@@ -71,12 +71,6 @@
  *
  * October 1992
  */
-//#define MSDOSFS_DEBUG 1
-#ifdef MSDOSFS_DEBUG
-#define msdos_dprintf(x) printf x;
-#else
-#define msdos_dprintf(x) ;
-#endif
 
 
 /*
@@ -137,18 +131,24 @@
 #define DE_SYNC		IO_SYNC	/* 0x4 do it synchronisly...from vnode.h */
 
 
-int pcbmap __P((struct denode *dep, u_long findcn, u_long numclusters, daddr_t *bnp, u_long *cnp, u_long *sp));
-int clusterfree __P((struct msdosfsmount *pmp, u_long cn, u_long *oldcnp));
-int clusteralloc __P((struct msdosfsmount *pmp, u_long start, u_long count, u_long fillwith, u_long *retcluster, u_long *got));
-int fatentry __P((int function, struct msdosfsmount *pmp, u_long cluster, u_long *oldcontents, u_long newcontents));
-int freeclusterchain __P((struct msdosfsmount *pmp, u_long startchain));
-int extendfile __P((struct denode *dep, u_long count));
+void msdosfs_fat_init(void);
+void msdosfs_fat_uninit(void);
+int  msdosfs_fat_init_vol(struct msdosfsmount *pmp, vfs_context_t context);
+void msdosfs_fat_uninit_vol(struct msdosfsmount *pmp);
+int pcbmap __P((struct denode *dep, u_long findcn, u_long numclusters, daddr64_t *bnp, u_long *cnp, u_long *sp, vfs_context_t context));
+int clusterfree __P((struct msdosfsmount *pmp, u_long cn, u_long *oldcnp, vfs_context_t context));
+int clusteralloc __P((struct msdosfsmount *pmp, u_long start, u_long count, u_long fillwith, u_long *retcluster, u_long *got, vfs_context_t context));
+int fatentry __P((int function, struct msdosfsmount *pmp, u_long cluster, u_long *oldcontents, u_long newcontents, vfs_context_t context));
+int freeclusterchain __P((struct msdosfsmount *pmp, u_long startchain, vfs_context_t context));
+int extendfile __P((struct denode *dep, u_long count, vfs_context_t context));
 void fc_purge __P((struct denode *dep, u_int frcn));
 
 /* [2753891]
  * Routine to mark a FAT16 or FAT32 volume as "clean" or "dirty" by manipulating the upper bit
  * of the FAT entry for cluster 1.  Note that this bit is not defined for FAT12 volumes.
  */
-int markvoldirty(struct msdosfsmount *pmp, int dirty);
+int markvoldirty(struct msdosfsmount *pmp, int dirty, vfs_context_t context);
+
+enum vtype msdosfs_check_link(struct denode *dep, vfs_context_t context);
 
 #endif	/* KERNEL */

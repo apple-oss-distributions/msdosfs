@@ -105,27 +105,6 @@ struct bpb710 {
 	/* There is a 12 byte filler here, but we ignore it */
 };
 
-#ifdef	atari
-/*
- * BPB for gemdos filesystems. Atari leaves the obsolete stuff undefined.
- * Currently there is no need for a separate BPB structure.
- */
-#if 0
-struct bpb_a {
-	u_int16_t	bpbBytesPerSec;	/* bytes per sector		*/
-	u_int8_t	bpbSecPerClust;	/* sectors per cluster		*/
-	u_int16_t	bpbResSectors;	/* number of reserved sectors	*/
-	u_int8_t	bpbFATs;	/* number of FATs		*/
-	u_int16_t	bpbRootDirEnts;	/* number of root directory entries */
-	u_int16_t	bpbSectors;	/* total number of sectors	*/
-	u_int8_t	bpbUseless1;	/* meaningless on gemdos fs	*/
-	u_int16_t	bpbFATsecs;	/* number of sectors per FAT	*/
-	u_int16_t	bpbUseless2;	/* meaningless for harddisk fs	*/
-	u_int16_t	bpbUseless3;	/* meaningless for harddisk fs	*/
-	u_int16_t	bpbHiddenSecs;	/* the TOS-BIOS ignores this	*/
-};
-#endif
-#endif	/* atari */
 
 /*
  * The following structures represent how the bpb's look on disk.  shorts
@@ -160,17 +139,17 @@ struct bpb_a {
  * BIOS Parameter Block (BPB) for DOS 3.3
  */
 struct byte_bpb33 {
-	int8_t bpbBytesPerSec[2];	/* bytes per sector */
-	int8_t bpbSecPerClust;		/* sectors per cluster */
-	int8_t bpbResSectors[2];	/* number of reserved sectors */
-	int8_t bpbFATs;			/* number of FATs */
-	int8_t bpbRootDirEnts[2];	/* number of root directory entries */
-	int8_t bpbSectors[2];		/* total number of sectors */
-	int8_t bpbMedia;		/* media descriptor */
-	int8_t bpbFATsecs[2];		/* number of sectors per FAT */
-	int8_t bpbSecPerTrack[2];	/* sectors per track */
-	int8_t bpbHeads[2];		/* number of heads */
-	int8_t bpbHiddenSecs[2];	/* number of hidden sectors */
+	u_int8_t bpbBytesPerSec[2];	/* bytes per sector */
+	u_int8_t bpbSecPerClust;		/* sectors per cluster */
+	u_int8_t bpbResSectors[2];	/* number of reserved sectors */
+	u_int8_t bpbFATs;			/* number of FATs */
+	u_int8_t bpbRootDirEnts[2];	/* number of root directory entries */
+	u_int8_t bpbSectors[2];		/* total number of sectors */
+	u_int8_t bpbMedia;		/* media descriptor */
+	u_int8_t bpbFATsecs[2];		/* number of sectors per FAT */
+	u_int8_t bpbSecPerTrack[2];	/* sectors per track */
+	u_int8_t bpbHeads[2];		/* number of heads */
+	u_int8_t bpbHiddenSecs[2];	/* number of hidden sectors */
 };
 
 /*
@@ -178,18 +157,18 @@ struct byte_bpb33 {
  * and bpbHugeSectors is not in the 3.3 bpb.
  */
 struct byte_bpb50 {
-	int8_t bpbBytesPerSec[2];	/* bytes per sector */
-	int8_t bpbSecPerClust;		/* sectors per cluster */
-	int8_t bpbResSectors[2];	/* number of reserved sectors */
-	int8_t bpbFATs;			/* number of FATs */
-	int8_t bpbRootDirEnts[2];	/* number of root directory entries */
-	int8_t bpbSectors[2];		/* total number of sectors */
-	int8_t bpbMedia;		/* media descriptor */
-	int8_t bpbFATsecs[2];		/* number of sectors per FAT */
-	int8_t bpbSecPerTrack[2];	/* sectors per track */
-	int8_t bpbHeads[2];		/* number of heads */
-	int8_t bpbHiddenSecs[4];	/* number of hidden sectors */
-	int8_t bpbHugeSectors[4];	/* # of sectors if bpbSectors == 0 */
+	u_int8_t bpbBytesPerSec[2];	/* bytes per sector */
+	u_int8_t bpbSecPerClust;		/* sectors per cluster */
+	u_int8_t bpbResSectors[2];	/* number of reserved sectors */
+	u_int8_t bpbFATs;			/* number of FATs */
+	u_int8_t bpbRootDirEnts[2];	/* number of root directory entries */
+	u_int8_t bpbSectors[2];		/* total number of sectors */
+	u_int8_t bpbMedia;		/* media descriptor */
+	u_int8_t bpbFATsecs[2];		/* number of sectors per FAT */
+	u_int8_t bpbSecPerTrack[2];	/* sectors per track */
+	u_int8_t bpbHeads[2];		/* number of heads */
+	u_int8_t bpbHiddenSecs[4];	/* number of hidden sectors */
+	u_int8_t bpbHugeSectors[4];	/* # of sectors if bpbSectors == 0 */
 };
 
 /*

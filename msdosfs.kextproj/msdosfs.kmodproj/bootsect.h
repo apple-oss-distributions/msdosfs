@@ -91,43 +91,9 @@ struct bootsector710 {
 #define	BOOTSIG0	0x55
 #define	BOOTSIG1	0xaa
 };
-#ifdef	atari
-/*
- * The boot sector on a gemdos fs is a little bit different from the msdos fs
- * format. Currently there is no need to declare a seperate structure, the
- * bootsector33 struct will do.
- */
-#if 0
-struct bootsec_atari {
-	u_int8_t	bsBranch[2];		/* branch inst if auto-boot	*/
-	int8_t		bsFiller[6];		/* anything or nothing		*/
-	int8_t		bsSerial[3];		/* serial no. for mediachange	*/
-	int8_t		bsBPB[19];		/* BIOS parameter block		*/
-	int8_t		bsBootCode[482];	/* pad so struct is 512b	*/
-};
-#endif
-#endif /* atari */
 
 union bootsector {
 	struct bootsector33 bs33;
 	struct bootsector50 bs50;
 	struct bootsector710 bs710;
 };
-
-#if 0
-/*
- * Shorthand for fields in the bpb.
- */
-#define	bsBytesPerSec	bsBPB.bpbBytesPerSec
-#define	bsSectPerClust	bsBPB.bpbSectPerClust
-#define	bsResSectors	bsBPB.bpbResSectors
-#define	bsFATS		bsBPB.bpbFATS
-#define	bsRootDirEnts	bsBPB.bpbRootDirEnts
-#define	bsSectors	bsBPB.bpbSectors
-#define	bsMedia		bsBPB.bpbMedia
-#define	bsFATsecs	bsBPB.bpbFATsecs
-#define	bsSectPerTrack	bsBPB.bpbSectPerTrack
-#define	bsHeads		bsBPB.bpbHeads
-#define	bsHiddenSecs	bsBPB.bpbHiddenSecs
-#define	bsHugeSectors	bsBPB.bpbHugeSectors
-#endif
