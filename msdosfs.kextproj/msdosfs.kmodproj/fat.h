@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -115,6 +115,52 @@
 
 #define	MSDOSFSEOF(pmp, cn)	((((cn) | ~(pmp)->pm_fatmask) & CLUST_EOFS) == CLUST_EOFS)
 
+/*
+		Symbolic Links for FAT
+
+FAT does not have native support for symbolic links (symlinks).  We
+implement them using ordinary files with a particular format.  Our
+symlink file format is modeled after the SMB for Mac OS X implementation.
+
+Symlink files are ordinary text files that look like:
+
+XSym
+1234
+00112233445566778899AABBCCDDEEFF
+/the/sym/link/path
+
+The lines of the file are separated by ASCII newline (0x0A).  The first
+line is a "magic" value to help identify the file.  The second line is
+the length of the symlink itself; it is four decimal digits, with leading
+zeroes.  The third line is the MD5 checksum of the symlink as 16
+hexadecimal bytes.  The fourth line is the symlink, up to 1024 bytes long.
+If the symlink is less than 1024 bytes, then it is padded with a single
+newline character and as many spaces as needed to occupy 1024 bytes.
+
+The file size is exactly 1067 (= 4 + 1 + 4 + 1 + 32 + 1 + 1024) bytes.
+When we encounter an ordinary file whose length is 1067, we must read
+it to verify that the header (including length and MD5 checksum) is
+correct.
+
+Since the file size is constant, we use the de_FileSize field in the
+denode to store the actual length of the symlink.  That way, we only
+check and parse the header once at vnode creation time.
+
+*/
+
+static const char symlink_magic[5] = "XSym\n";
+
+#define SYMLINK_LINK_MAX 1024
+
+struct symlink {
+	char magic[5];		/* == symlink_magic */
+	char length[4];		/* four decimal digits */
+	char newline1;		/* '\n' */
+	char md5[32];		/* MD5 hex digest of "length" bytes of "link" field */
+	char newline2;		/* '\n' */
+	char link[SYMLINK_LINK_MAX]; /* "length" bytes, padded by '\n' and spaces */
+};
+
 #ifdef KERNEL
 /*
  * These are the values for the function argument to the function
@@ -133,28 +179,37 @@
 
 void msdosfs_fat_init(void);
 void msdosfs_fat_uninit(void);
-int  msdosfs_fat_init_vol(struct msdosfsmount *pmp, vfs_context_t context);
+int  msdosfs_fat_init_vol(struct msdosfsmount *pmp);
 void msdosfs_fat_uninit_vol(struct msdosfsmount *pmp);
-int pcbmap __P((struct denode *dep, u_long findcn, u_long numclusters, daddr64_t *bnp, u_long *cnp, u_long *sp, vfs_context_t context));
-int clusterfree __P((struct msdosfsmount *pmp, u_long cn, u_long *oldcnp, vfs_context_t context));
-int clusteralloc __P((struct msdosfsmount *pmp, u_long start, u_long count, u_long fillwith, u_long *retcluster, u_long *got, vfs_context_t context));
-int fatentry __P((int function, struct msdosfsmount *pmp, u_long cluster, u_long *oldcontents, u_long newcontents, vfs_context_t context));
-int freeclusterchain __P((struct msdosfsmount *pmp, u_long startchain, vfs_context_t context));
-int extendfile __P((struct denode *dep, u_long count, vfs_context_t context));
-void fc_purge __P((struct denode *dep, u_int frcn));
+int msdosfs_update_fsinfo(struct msdosfsmount *pmp, int waitfor, vfs_context_t context);
+int pcbmap (struct denode *dep, u_long findcn, u_long numclusters, daddr64_t *bnp, u_long *cnp, u_long *sp);
+int pcbmap_internal(struct denode *dep, u_long findcn, u_long numclusters, daddr64_t *bnp, u_long *cnp, u_long *sp);
+int clusterfree __P((struct msdosfsmount *pmp, u_long cn, u_long *oldcnp));
+int clusteralloc __P((struct msdosfsmount *pmp, u_long start, u_long count, u_long fillwith, u_long *retcluster, u_long *got));
+int fatentry __P((int function, struct msdosfsmount *pmp, u_long cluster, u_long *oldcontents, u_long newcontents));
+int freeclusterchain __P((struct msdosfsmount *pmp, u_long startchain));
+int extendfile __P((struct denode *dep, u_long count));
 
 /* [2753891]
  * Routine to mark a FAT16 or FAT32 volume as "clean" or "dirty" by manipulating the upper bit
  * of the FAT entry for cluster 1.  Note that this bit is not defined for FAT12 volumes.
  */
-int markvoldirty(struct msdosfsmount *pmp, int dirty, vfs_context_t context);
+int markvoldirty(struct msdosfsmount *pmp, int dirty);
 
 /*
  * Write the primary/active FAT and all directories to the device.  This
  * skips the boot sector, FSInfo sector, and non-active copies of the FAT.
  */
-void msdosfs_meta_flush(struct msdosfsmount *pmp);
+void msdosfs_meta_flush(struct msdosfsmount *pmp, int sync);
+void msdosfs_meta_sync_callback(void *pmp, void *unused);
 
 enum vtype msdosfs_check_link(struct denode *dep, vfs_context_t context);
+
+__private_extern__ u_char l2u[256];
+
+/*
+ * Tunables to control delayed metadata sync.
+ */
+extern uint32_t msdosfs_meta_delay;
 
 #endif	/* KERNEL */

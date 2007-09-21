@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -85,10 +85,16 @@
 #include <sys/ubc.h>
 #include <sys/utfconv.h>
 #include <sys/disk.h>
+#include <sys/sysctl.h>
 #include <mach/kmod.h>
+#include <libkern/OSBase.h>
+#include <libkern/OSAtomic.h>
+#include <kern/clock.h>
 #include <kern/thread.h>
-
+#include <kern/thread_call.h>
 #include <miscfs/specfs/specdev.h>
+#include <IOKit/IOTypes.h>
+#include <libkern/OSMalloc.h>
 
 #include "bpb.h"
 #include "bootsect.h"
@@ -103,9 +109,19 @@ extern u_int16_t dos2unicode[32];
 
 extern long msdos_secondsWest;	/* In msdosfs_conv.c */
 
+lck_grp_attr_t *msdosfs_lck_grp_attr = NULL;
+lck_grp_t *msdosfs_lck_grp = NULL;
+lck_attr_t *msdosfs_lck_attr = NULL;
+OSMallocTag msdosfs_malloc_tag = NULL;
+
+#if DEBUG
+SYSCTL_DECL(_vfs_generic);
+SYSCTL_NODE(_vfs_generic, OID_AUTO, msdosfs, CTLFLAG_RW, 0, "msdosfs (FAT) file system");
+SYSCTL_INT(_vfs_generic_msdosfs, OID_AUTO, meta_delay, CTLFLAG_RW, &msdosfs_meta_delay, 0, "max delay before flushing metadata (ms)");
+#endif
+
 static int	update_mp __P((struct mount *mp, struct msdosfs_args *argp));
-static int	mountmsdosfs __P((vnode_t devvp, struct mount *mp,
-				  vfs_context_t context, struct msdosfs_args *argp));
+static int	mountmsdosfs __P((vnode_t devvp, struct mount *mp, vfs_context_t context));
 static int	msdosfs_mount __P((struct mount *mp, vnode_t devvp, user_addr_t data, vfs_context_t));
 static int	msdosfs_root __P((struct mount *, vnode_t *, vfs_context_t));
 static int	msdosfs_statfs __P((struct mount *, struct vfsstatfs *, vfs_context_t));
@@ -116,23 +132,42 @@ static int	msdosfs_unmount __P((struct mount *, int, vfs_context_t));
 
 static int	get_root_label(struct mount *mp, vfs_context_t context);
 
+/* The routines are exported for the KEXT glue to link against. */
+int msdosfs_module_start(kmod_info_t *ki, void *data);
+int msdosfs_module_stop (kmod_info_t *ki, void *data);
+
 /*ARGSUSED*/
 static int 
-msdosfs_init(vfsp)
-	struct vfsconf *vfsp;
+msdosfs_init(struct vfsconf *vfsp)
 {
+#pragma unused (vfsp)
+	msdosfs_lck_grp_attr = lck_grp_attr_alloc_init();
+	msdosfs_lck_grp = lck_grp_alloc_init("msdosfs", msdosfs_lck_grp_attr);
+	msdosfs_lck_attr = lck_attr_alloc_init();
+	
+	msdosfs_malloc_tag = OSMalloc_Tagalloc("msdosfs", OSMT_DEFAULT);
+	
 	msdosfs_hash_init();
-	msdosfs_fat_init();
 	return 0;
 }
 
 
+/*
+ * There is no "un-init" VFS operation.  This routine is only called by
+ * the KEXT as it is about to be unloaded.
+ */
+
 static int
-msdosfs_uninit(vfsp)
-	struct vfsconf *vfsp;
+msdosfs_uninit(void)
 {
-	msdosfs_fat_uninit();
 	msdosfs_hash_uninit();
+	
+	OSMalloc_Tagfree(msdosfs_malloc_tag);
+	
+	lck_attr_free(msdosfs_lck_attr);
+	lck_grp_free(msdosfs_lck_grp);
+	lck_grp_attr_free(msdosfs_lck_grp_attr);
+	
 	return 0;
 }
 
@@ -207,7 +242,7 @@ msdosfs_mount(mp, devvp, data, context)
 			pmp->pm_flags &= ~MSDOSFSMNT_RONLY;
 
 			/* Now that the volume is modifiable, mark it dirty */
-			error = markvoldirty(pmp, 1, context);
+			error = markvoldirty(pmp, 1);
 			if (error) {
 				pmp->pm_flags |= MSDOSFSMNT_RONLY;
 				return error;
@@ -216,7 +251,7 @@ msdosfs_mount(mp, devvp, data, context)
 	}
 
 	if ( !vfs_isupdate(mp)) {
-		error = mountmsdosfs(devvp, mp, context, &args);
+		error = mountmsdosfs(devvp, mp, context);
 		if (error)
 			return error;	/* mountmsdosfs cleaned up already */
 	}
@@ -234,11 +269,10 @@ msdosfs_mount(mp, devvp, data, context)
 }
 
 static int
-mountmsdosfs(devvp, mp, context, argp)
+mountmsdosfs(devvp, mp, context)
 	vnode_t devvp;
 	struct mount *mp;
 	vfs_context_t context;
-	struct msdosfs_args *argp;
 {
 	struct msdosfsmount *pmp;
 	struct buf *bp;
@@ -248,6 +282,7 @@ mountmsdosfs(devvp, mp, context, argp)
 	struct byte_bpb50 *b50;
 	struct byte_bpb710 *b710;
 	u_int8_t SecPerClust;
+	u_long fat_sectors;
 	u_long clusters;
 	int	ronly, error;
 	struct vfsstatfs *vfsstatfs;
@@ -273,6 +308,8 @@ mountmsdosfs(devvp, mp, context, argp)
 
 	ronly = vfs_isrdonly(mp);
 
+	vfs_setlocklocal(mp);
+	
 	bp  = NULL; /* both used in error_exit */
 	pmp = NULL;
 
@@ -280,9 +317,9 @@ mountmsdosfs(devvp, mp, context, argp)
 	 * Read the boot sector of the filesystem, and then check the
 	 * boot signature.  If not a dos boot sector then error out.
 	 *
-	 * NOTE: 2048 is a maximum sector size in current...
+	 * NOTE: 4096 is a maximum sector size in current...
 	 */
-	error = (int)buf_meta_bread(devvp, 0, 2048, vfs_context_ucred(context), &bp);
+	error = (int)buf_meta_bread(devvp, 0, 4096, vfs_context_ucred(context), &bp);
 	if (error)
 		goto error_exit;
 	buf_markaged(bp);
@@ -310,6 +347,8 @@ mountmsdosfs(devvp, mp, context, argp)
 	MALLOC(pmp, struct msdosfsmount *, sizeof(*pmp), M_TEMP, M_WAITOK);
 	bzero((caddr_t)pmp, sizeof *pmp);
 	pmp->pm_mountp = mp;
+	pmp->pm_fat_lock = lck_mtx_alloc_init(msdosfs_lck_grp, msdosfs_lck_attr);
+	pmp->pm_rename_lock = lck_mtx_alloc_init(msdosfs_lck_grp, msdosfs_lck_attr);
 
 	/*
 	 * Compute several useful quantities from the bpb in the
@@ -322,7 +361,7 @@ mountmsdosfs(devvp, mp, context, argp)
 	pmp->pm_FATs = b50->bpbFATs;
 	pmp->pm_RootDirEnts = getushort(b50->bpbRootDirEnts);
 	pmp->pm_Sectors = getushort(b50->bpbSectors);
-	pmp->pm_FATsecs = getushort(b50->bpbFATsecs);
+	fat_sectors = getushort(b50->bpbFATsecs);
 	pmp->pm_SecPerTrack = getushort(b50->bpbSecPerTrack);
 	pmp->pm_Heads = getushort(b50->bpbHeads);
 	pmp->pm_Media = b50->bpbMedia;
@@ -344,7 +383,7 @@ mountmsdosfs(devvp, mp, context, argp)
 
 	if (pmp->pm_RootDirEnts == 0) {
 		if (pmp->pm_Sectors != 0
-		    || pmp->pm_FATsecs != 0
+		    || fat_sectors != 0
 		    || getushort(b710->bpbFSVers) != 0) {
 			error = EINVAL;
 			printf("mountmsdosfs(): bad FAT32 filesystem\n");
@@ -353,7 +392,7 @@ mountmsdosfs(devvp, mp, context, argp)
 		pmp->pm_fatmask = FAT32_MASK;
 		pmp->pm_fatmult = 4;
 		pmp->pm_fatdiv = 1;
-		pmp->pm_FATsecs = getulong(b710->bpbBigFATsecs);
+		fat_sectors = getulong(b710->bpbBigFATsecs);
 		if (getushort(b710->bpbExtFlags) & FATMIRROR)
 			pmp->pm_curfat = getushort(b710->bpbExtFlags) & FATNUM;
 		else
@@ -380,14 +419,14 @@ mountmsdosfs(devvp, mp, context, argp)
 	if (FAT32(pmp)) {
 		pmp->pm_rootdirblk = getulong(b710->bpbRootClust);
 		pmp->pm_firstcluster = pmp->pm_ResSectors
-			+ (pmp->pm_FATs * pmp->pm_FATsecs);
+			+ (pmp->pm_FATs * fat_sectors);
 		pmp->pm_fsinfo = getushort(b710->bpbFSInfo);
 	} else {
                 /*
                  * Compute the root directory and first cluster as sectors
                  * so that pm_maxcluster will be correct, below.
                  */
-		pmp->pm_rootdirblk = (pmp->pm_ResSectors + (pmp->pm_FATs * pmp->pm_FATsecs));
+		pmp->pm_rootdirblk = (pmp->pm_ResSectors + (pmp->pm_FATs * fat_sectors));
 		pmp->pm_rootdirsize = (pmp->pm_RootDirEnts * sizeof(struct dosdirentry)
 				       + pmp->pm_BytesPerSec - 1)
 			/ pmp->pm_BytesPerSec; /* in sectors */
@@ -404,7 +443,10 @@ mountmsdosfs(devvp, mp, context, argp)
         pmp->pm_firstcluster *= pmp->pm_BlocksPerSec;	/* Convert to physical (device) blocks */
 
 	if (pmp->pm_fatmask == 0) {
-		if (pmp->pm_maxcluster
+		/*
+		 * pm_maxcluster - 1 == number of clusters on the volume
+		 */
+		if ((pmp->pm_maxcluster - 1)
 		    <= ((CLUST_RSRVD - CLUST_FIRST) & FAT12_MASK)) {
 			/*
 			 * This will usually be a floppy disk. This size makes
@@ -422,7 +464,7 @@ mountmsdosfs(devvp, mp, context, argp)
 	}
 
 	/* Compute number of clusters this FAT could hold based on its total size */
-	clusters = pmp->pm_FATsecs * pmp->pm_BytesPerSec;	/* Size of FAT in bytes */
+	clusters = fat_sectors * pmp->pm_BytesPerSec;	/* Size of FAT in bytes */
 	clusters *= pmp->pm_fatdiv;
 	clusters /= pmp->pm_fatmult;				/* Max number of clusters, rounded down */
         
@@ -436,9 +478,9 @@ mountmsdosfs(devvp, mp, context, argp)
 	if (FAT12(pmp))
 		pmp->pm_fatblocksize = 3 * pmp->pm_BytesPerSec;
 	else
-		pmp->pm_fatblocksize = MSDOSFS_DFLTBSIZE;
+		pmp->pm_fatblocksize = PAGE_SIZE;
 
-	pmp->pm_fatblocksec = pmp->pm_fatblocksize / pmp->pm_BytesPerSec;
+	pmp->pm_fat_bytes = fat_sectors * pmp->pm_BytesPerSec;
 	pmp->pm_bnshift = ffs(pmp->pm_BlockSize) - 1;
 
 	/*
@@ -481,7 +523,7 @@ mountmsdosfs(devvp, mp, context, argp)
 			 * characters are an extension, and it will put a period before the
 			 * extension.
 			 */
-			for (i=0; i<11; i++) {
+			for (i=0; i<SHORT_NAME_LEN; i++) {
 				uc = extboot->exVolumeLabel[i];
 				if (i==0 && uc == SLOT_E5)
 					uc = 0xE5;
@@ -550,10 +592,20 @@ mountmsdosfs(devvp, mp, context, argp)
 	 * Set up the per-volume FAT structures, including
 	 * the in-use map.
 	 */
-	error = msdosfs_fat_init_vol(pmp, context);
+	error = msdosfs_fat_init_vol(pmp);
 	if (error != 0)
 		goto error_exit;
 
+	/*
+	 * Initialize a timer to automatically sync shortly after writing.
+	 */
+	pmp->pm_sync_timer = thread_call_allocate(msdosfs_meta_sync_callback, pmp);
+	if (pmp->pm_sync_timer == NULL)
+	{
+		error = ENOMEM;
+		goto error_exit;
+	}
+	
 	/*
 	 * Finish up.
 	 */
@@ -561,10 +613,8 @@ mountmsdosfs(devvp, mp, context, argp)
 		pmp->pm_flags |= MSDOSFSMNT_RONLY;
 	else {
 		/* [2753891] Mark the volume dirty while it is mounted read/write */
-		if ((error = markvoldirty(pmp, 1, context)) != 0)
+		if ((error = markvoldirty(pmp, 1)) != 0)
 			goto error_exit;
-
-		pmp->pm_fmod = 1;
 	}
 	vfs_setfsprivate(mp, (void *)pmp);
 
@@ -574,11 +624,10 @@ mountmsdosfs(devvp, mp, context, argp)
 	vfsstatfs = vfs_statfs(mp);
 	vfsstatfs->f_bsize = pmp->pm_bpcluster;
 	vfsstatfs->f_iosize = pmp->pm_bpcluster;
-	vfsstatfs->f_blocks = pmp->pm_maxcluster + 1;
+	/* Clusters are numbered from 2..pm_maxcluster, so pm_maxcluster - 2 + 1 of them */
+	vfsstatfs->f_blocks = pmp->pm_maxcluster - 1;
 	vfsstatfs->f_fsid.val[0] = (long)dev;
 	vfsstatfs->f_fsid.val[1] = vfs_typenum(mp);
-
-	vnode_setmountedon(devvp);
 
 	vfs_setflags(mp, MNT_IGNORE_OWNERSHIP);
 	
@@ -590,8 +639,17 @@ error_exit:
 	if (bp)
 		buf_brelse(bp);
 	if (pmp) {
+		if (pmp->pm_sync_timer)
+		{
+			thread_call_free(pmp->pm_sync_timer);
+			pmp->pm_sync_timer = NULL;
+		}
+		
 		msdosfs_fat_uninit_vol(pmp);
 
+		lck_mtx_free(pmp->pm_fat_lock, msdosfs_lck_grp);
+		lck_mtx_free(pmp->pm_rename_lock, msdosfs_lck_grp);
+		
 		FREE(pmp, M_TEMP);
 
 		vfs_setfsprivate(mp, (void *)NULL);
@@ -605,11 +663,11 @@ error_exit:
  */
 /* ARGSUSED */
 static int
-msdosfs_start(mp, flags, p)
-	struct mount *mp;
-	int flags;
-	proc_t p;
+msdosfs_start(struct mount *mp, int flags, vfs_context_t context)
 {
+#pragma unused (mp)
+#pragma unused (flags)
+#pragma unused (context)
 	return (0);
 }
 
@@ -626,28 +684,64 @@ msdosfs_unmount(mp, mntflags, context)
 	int error, flags;
 	int force;
 
-	flags = 0;
+	pmp = VFSTOMSDOSFS(mp);
+
+	flags = SKIPSYSTEM;
 	force = 0;
 	if (mntflags & MNT_FORCE) {
 		flags |= FORCECLOSE;
 		force = 1;
 	}
 
+	/*
+	 * Cancel any pending timers for this volume.  Then wait for any timers
+	 * which have fired, but whose callbacks have not yet completed.
+	 */
+	if (pmp->pm_sync_timer)
+	{
+		struct timespec ts = {0, 100000000};	/* 0.1 seconds */
+		
+		/*
+		 * Cancel any timers that have been scheduled, but have not
+		 * fired yet.  NOTE: The kernel considers a timer complete as
+		 * soon as it starts your callback, so the kernel does not
+		 * keep track of the number of callbacks in progress.
+		 */
+		if (thread_call_cancel(pmp->pm_sync_timer))
+			OSDecrementAtomic(&pmp->pm_sync_count);
+		thread_call_free(pmp->pm_sync_timer);
+		pmp->pm_sync_timer = NULL;
+		
+		/*
+		 * This waits for all of the callbacks that were entered before
+		 * we did thread_call_cancel above, but have not completed yet.
+		 */
+		while(pmp->pm_sync_count > 0)
+		{
+			msleep(&pmp->pm_sync_count, NULL, PWAIT, "msdosfs_unmount", &ts);
+		}
+		
+		if (pmp->pm_sync_count < 0)
+			panic("msdosfs_unmount: pm_sync_count underflow!\n");
+	}
+	
 	error = vflush(mp, NULLVP, flags);
 	if (error && !force)
 		return (error);
-	pmp = VFSTOMSDOSFS(mp);
 
 	/* [2753891] If the volume was mounted read/write, mark it clean now */
 	if ((pmp->pm_flags & MSDOSFSMNT_RONLY) == 0) {
-		error = markvoldirty(pmp, 0, context);
+		error = markvoldirty(pmp, 0);
 		if (error && !force)
 			return (error);
 	}
 	
-	/*¥ Flush the device here? */
-	
 	msdosfs_fat_uninit_vol(pmp);
+	VNOP_FSYNC(pmp->pm_devvp, MNT_WAIT, context);
+
+	lck_mtx_free(pmp->pm_fat_lock, msdosfs_lck_grp);
+	lck_mtx_free(pmp->pm_rename_lock, msdosfs_lck_grp);
+	
 	FREE(pmp, M_TEMP);
 
 	vfs_setfsprivate(mp, (void *)NULL);
@@ -679,6 +773,7 @@ msdosfs_statfs(mp, sbp, context)
 	struct vfsstatfs *sbp;
 	vfs_context_t context;
 {
+#pragma unused (context)
 	struct msdosfsmount *pmp;
 
 	pmp = VFSTOMSDOSFS(mp);
@@ -713,6 +808,7 @@ msdosfs_statfs(mp, sbp, context)
 static int
 msdosfs_vfs_getattr(mount_t mp, struct vfs_attr *attr, vfs_context_t context)
 {
+#pragma unused (context)
 	struct vfsstatfs *stats;
 	struct msdosfsmount *pmp;
 
@@ -722,8 +818,9 @@ msdosfs_vfs_getattr(mount_t mp, struct vfs_attr *attr, vfs_context_t context)
 	/* FAT doesn't track the object counts */
 	
 	VFSATTR_RETURN(attr, f_bsize,  pmp->pm_bpcluster);
-	VFSATTR_RETURN(attr, f_iosize, pmp->pm_bpcluster);
-	VFSATTR_RETURN(attr, f_blocks, pmp->pm_maxcluster + 1);
+	VFSATTR_RETURN(attr, f_iosize, ubc_upl_maxbufsize());
+	/* Clusters are numbered from 2..pm_maxcluster, so pm_maxcluster - 2 + 1 of them */
+	VFSATTR_RETURN(attr, f_blocks, pmp->pm_maxcluster - 1);
 	VFSATTR_RETURN(attr, f_bfree,  pmp->pm_freeclustercount);
 	VFSATTR_RETURN(attr, f_bavail, pmp->pm_freeclustercount);
 	VFSATTR_RETURN(attr, f_bused,  attr->f_blocks - attr->f_bfree);
@@ -738,9 +835,11 @@ msdosfs_vfs_getattr(mount_t mp, struct vfs_attr *attr, vfs_context_t context)
 	
 	if (VFSATTR_IS_ACTIVE(attr, f_capabilities)) {
 		attr->f_capabilities.capabilities[VOL_CAPABILITIES_FORMAT] = 
+			VOL_CAP_FMT_SYMBOLICLINKS |
 			VOL_CAP_FMT_NO_ROOT_TIMES |
 			VOL_CAP_FMT_CASE_PRESERVING |
-			VOL_CAP_FMT_FAST_STATFS ;
+			VOL_CAP_FMT_FAST_STATFS |
+			VOL_CAP_FMT_HIDDEN_FILES ;
 		attr->f_capabilities.capabilities[VOL_CAPABILITIES_INTERFACES] = 
 			VOL_CAP_INT_VOL_RENAME |
 			VOL_CAP_INT_ADVLOCK |
@@ -759,7 +858,10 @@ msdosfs_vfs_getattr(mount_t mp, struct vfs_attr *attr, vfs_context_t context)
 			VOL_CAP_FMT_ZERO_RUNS |
 			VOL_CAP_FMT_CASE_SENSITIVE |
 			VOL_CAP_FMT_CASE_PRESERVING |
-			VOL_CAP_FMT_FAST_STATFS ;
+			VOL_CAP_FMT_FAST_STATFS | 
+			VOL_CAP_FMT_2TB_FILESIZE |
+			VOL_CAP_FMT_OPENDENYMODES |
+			VOL_CAP_FMT_HIDDEN_FILES ;
 		attr->f_capabilities.valid[VOL_CAPABILITIES_INTERFACES] =
 			VOL_CAP_INT_SEARCHFS |
 			VOL_CAP_INT_ATTRLIST |
@@ -770,10 +872,136 @@ msdosfs_vfs_getattr(mount_t mp, struct vfs_attr *attr, vfs_context_t context)
 			VOL_CAP_INT_ALLOCATE |
 			VOL_CAP_INT_VOL_RENAME |
 			VOL_CAP_INT_ADVLOCK |
-			VOL_CAP_INT_FLOCK ;
+			VOL_CAP_INT_FLOCK |
+			VOL_CAP_INT_MANLOCK ;
 		attr->f_capabilities.valid[VOL_CAPABILITIES_RESERVED1] = 0;
 		attr->f_capabilities.valid[VOL_CAPABILITIES_RESERVED2] = 0;
 		VFSATTR_SET_SUPPORTED(attr, f_capabilities);
+	}
+
+	if (VFSATTR_IS_ACTIVE(attr, f_attributes)) {
+		attr->f_attributes.validattr.commonattr =
+			ATTR_CMN_NAME	|
+			ATTR_CMN_DEVID	|
+			ATTR_CMN_FSID	|
+			ATTR_CMN_OBJTYPE |
+			ATTR_CMN_OBJTAG	|
+			ATTR_CMN_OBJID	|
+			/* ATTR_CMN_OBJPERMANENTID | */
+			ATTR_CMN_PAROBJID |
+			/* ATTR_CMN_SCRIPT | */
+			ATTR_CMN_CRTIME |
+			ATTR_CMN_MODTIME |
+			ATTR_CMN_CHGTIME |
+			ATTR_CMN_ACCTIME |
+			/* ATTR_CMN_BKUPTIME | */
+			/* ATTR_CMN_FNDRINFO | */
+			ATTR_CMN_OWNERID |
+			ATTR_CMN_GRPID	|
+			ATTR_CMN_ACCESSMASK |
+			ATTR_CMN_FLAGS	|
+			ATTR_CMN_USERACCESS |
+			/* ATTR_CMN_EXTENDED_SECURITY | */
+			/* ATTR_CMN_UUID | */
+			/* ATTR_CMN_GRPUUID | */
+			0;
+		attr->f_attributes.validattr.volattr =
+			ATTR_VOL_FSTYPE	|
+			/* ATTR_VOL_SIGNATURE */
+			ATTR_VOL_SIZE	|
+			ATTR_VOL_SPACEFREE |
+			ATTR_VOL_SPACEAVAIL |
+			ATTR_VOL_MINALLOCATION |
+			ATTR_VOL_ALLOCATIONCLUMP |
+			ATTR_VOL_IOBLOCKSIZE |
+			/* ATTR_VOL_OBJCOUNT */
+			/* ATTR_VOL_FILECOUNT */
+			/* ATTR_VOL_DIRCOUNT */
+			/* ATTR_VOL_MAXOBJCOUNT */
+			ATTR_VOL_MOUNTPOINT |
+			ATTR_VOL_NAME	|
+			ATTR_VOL_MOUNTFLAGS |
+			ATTR_VOL_MOUNTEDDEVICE |
+			/* ATTR_VOL_ENCODINGSUSED */
+			ATTR_VOL_CAPABILITIES |
+			ATTR_VOL_ATTRIBUTES;
+		attr->f_attributes.validattr.dirattr =
+			ATTR_DIR_LINKCOUNT |
+			/* ATTR_DIR_ENTRYCOUNT */
+			ATTR_DIR_MOUNTSTATUS;
+		attr->f_attributes.validattr.fileattr =
+			ATTR_FILE_LINKCOUNT |
+			ATTR_FILE_TOTALSIZE |
+			ATTR_FILE_ALLOCSIZE |
+			/* ATTR_FILE_IOBLOCKSIZE */
+			ATTR_FILE_DEVTYPE |
+			/* ATTR_FILE_FORKCOUNT */
+			/* ATTR_FILE_FORKLIST */
+			ATTR_FILE_DATALENGTH |
+			ATTR_FILE_DATAALLOCSIZE |
+			ATTR_FILE_RSRCLENGTH |
+			ATTR_FILE_RSRCALLOCSIZE;
+		attr->f_attributes.validattr.forkattr = 0;
+		attr->f_attributes.nativeattr.commonattr =
+			ATTR_CMN_NAME	|
+			ATTR_CMN_DEVID	|
+			ATTR_CMN_FSID	|
+			ATTR_CMN_OBJTYPE |
+			ATTR_CMN_OBJTAG	|
+			ATTR_CMN_OBJID	|
+			/* ATTR_CMN_OBJPERMANENTID | */
+			ATTR_CMN_PAROBJID |
+			/* ATTR_CMN_SCRIPT | */
+			ATTR_CMN_CRTIME |
+			ATTR_CMN_MODTIME |
+			/* ATTR_CMN_CHGTIME | */	/* Supported but not native */
+			ATTR_CMN_ACCTIME |
+			/* ATTR_CMN_BKUPTIME | */
+			/* ATTR_CMN_FNDRINFO | */
+			/* ATTR_CMN_OWNERID | */	/* Supported but not native */
+			/* ATTR_CMN_GRPID	| */	/* Supported but not native */
+			/* ATTR_CMN_ACCESSMASK | */	/* Supported but not native */
+			ATTR_CMN_FLAGS	|
+			ATTR_CMN_USERACCESS |
+			/* ATTR_CMN_EXTENDED_SECURITY | */
+			/* ATTR_CMN_UUID | */
+			/* ATTR_CMN_GRPUUID | */
+			0;
+		attr->f_attributes.nativeattr.volattr =
+			ATTR_VOL_FSTYPE	|
+			/* ATTR_VOL_SIGNATURE */
+			ATTR_VOL_SIZE	|
+			ATTR_VOL_SPACEFREE |
+			ATTR_VOL_SPACEAVAIL |
+			ATTR_VOL_MINALLOCATION |
+			ATTR_VOL_ALLOCATIONCLUMP |
+			ATTR_VOL_IOBLOCKSIZE |
+			/* ATTR_VOL_OBJCOUNT */
+			/* ATTR_VOL_FILECOUNT */
+			/* ATTR_VOL_DIRCOUNT */
+			/* ATTR_VOL_MAXOBJCOUNT */
+			ATTR_VOL_MOUNTPOINT |
+			ATTR_VOL_NAME	|
+			ATTR_VOL_MOUNTFLAGS |
+			ATTR_VOL_MOUNTEDDEVICE |
+			/* ATTR_VOL_ENCODINGSUSED */
+			ATTR_VOL_CAPABILITIES |
+			ATTR_VOL_ATTRIBUTES;
+		attr->f_attributes.nativeattr.dirattr = 0;
+		attr->f_attributes.nativeattr.fileattr =
+			/* ATTR_FILE_LINKCOUNT | */	/* Supported but not native */
+			ATTR_FILE_TOTALSIZE |
+			ATTR_FILE_ALLOCSIZE |
+			/* ATTR_FILE_IOBLOCKSIZE */
+			ATTR_FILE_DEVTYPE |
+			/* ATTR_FILE_FORKCOUNT */
+			/* ATTR_FILE_FORKLIST */
+			ATTR_FILE_DATALENGTH |
+			ATTR_FILE_DATAALLOCSIZE |
+			ATTR_FILE_RSRCLENGTH |
+			ATTR_FILE_RSRCALLOCSIZE;
+		attr->f_attributes.nativeattr.forkattr = 0;
+		VFSATTR_SET_SUPPORTED(attr, f_attributes);
 	}
 
 	/* FAT doesn't have volume dates */
@@ -797,7 +1025,7 @@ msdosfs_vfs_getattr(mount_t mp, struct vfs_attr *attr, vfs_context_t context)
 	/* f_bsize returned above */
 	
 	if (VFSATTR_IS_ACTIVE(attr, f_vol_name)) {
-		strcpy(attr->f_vol_name, pmp->pm_label);
+		strlcpy(attr->f_vol_name, (char*)pmp->pm_label, MAXPATHLEN);
 		VFSATTR_SET_SUPPORTED(attr, f_vol_name);
 	}
 	
@@ -812,27 +1040,25 @@ static int	msdosfs_vfs_setattr(mount_t mp, struct vfs_attr *attr, vfs_context_t 
 
 	if (VFSATTR_IS_ACTIVE(attr, f_vol_name))
 	{
-		extern u_char l2u[256];
-		u_char unicode2dos(u_int16_t uc);
 	    struct buf *bp = NULL;
-	    int i;
+	    size_t i;
 	    int len;
 	    size_t unichars;
 		u_int16_t c;
-	    u_int16_t volName[11];
-	    u_char label[11];
+	    u_int16_t volName[SHORT_NAME_LEN];
+	    u_char label[SHORT_NAME_LEN];
 
 		len = strlen(attr->f_vol_name);
         if (len > 63)
         	return EINVAL;
 
 		/* Convert the UTF-8 to UTF-16 */
-        error = utf8_decodestr(attr->f_vol_name, len, volName,
+        error = utf8_decodestr((u_int8_t*)attr->f_vol_name, len, volName,
         	&unichars, sizeof(volName), 0, UTF_PRECOMPOSED);
         if (error)
             return error;
         unichars /= 2;	/* Bytes to characters */
-		if (unichars > 11)
+		if (unichars > SHORT_NAME_LEN)
 			return EINVAL;
 
         /*
@@ -847,7 +1073,7 @@ static int	msdosfs_vfs_setattr(mount_t mp, struct vfs_attr *attr, vfs_context_t 
          */
         
         /* Name is trailing space padded, so init to all spaces. */
-        for (i=0; i<11; ++i)
+        for (i=0; i<SHORT_NAME_LEN; ++i)
             label[i] = ' ';
 
         for (i=0; i<unichars; ++i) {
@@ -869,9 +1095,9 @@ static int	msdosfs_vfs_setattr(mount_t mp, struct vfs_attr *attr, vfs_context_t 
         error = (int)buf_meta_bread(pmp->pm_devvp, 0, pmp->pm_BlockSize, vfs_context_ucred(context), &bp);
         if (!error) {
             if (FAT32(pmp))
-                bcopy(label, (char*)buf_dataptr(bp)+71, 11);
+                bcopy(label, (char*)buf_dataptr(bp)+71, SHORT_NAME_LEN);
             else
-                bcopy(label, (char*)buf_dataptr(bp)+43, 11);
+                bcopy(label, (char*)buf_dataptr(bp)+43, SHORT_NAME_LEN);
             buf_bdwrite(bp);
             bp = NULL;
         }
@@ -887,7 +1113,7 @@ static int	msdosfs_vfs_setattr(mount_t mp, struct vfs_attr *attr, vfs_context_t 
         if (pmp->pm_label_cluster != CLUST_EOFE) {
         	error = readep(pmp, pmp->pm_label_cluster, pmp->pm_label_offset, &bp, NULL, context);
             if (!error) {
-                bcopy(label, (char *)buf_dataptr(bp) + pmp->pm_label_offset, 11);
+                bcopy(label, (char *)buf_dataptr(bp) + pmp->pm_label_offset, SHORT_NAME_LEN);
                 buf_bdwrite(bp);
                 bp = NULL;
             }
@@ -914,26 +1140,39 @@ struct msdosfs_sync_cargs {
 static int
 msdosfs_sync_callback(vnode_t vp, void *cargs)
 {
-	struct denode *dep;
 	struct msdosfs_sync_cargs *args;
+	struct denode *dep;
 	int error;
 
-	args = (struct msdosfs_sync_cargs *)cargs;
-
+	/*
+	 * msdosfs_check_link creates a temporary vnode whose v_data is
+	 * NULL.  It normally gets reclaimed very quickly, but it is
+	 * possible for a sync() to race with that reclaim.  Since that
+	 * vnode doesn't have a denode to go with it, we can just ignore
+	 * it for the purposes of syncing.
+	 */
 	dep = VTODE(vp);
-
-	if ((dep->de_flag & (DE_ACCESS | DE_CREATE | DE_UPDATE | DE_MODIFIED)) || vnode_hasdirtyblks(vp)) {
-		/*
-		 * Since directories are accessed via the device vnode, don't bother
-		 * flushing them here.  Instead, we'll flush them all at once when
-		 * we flush the device vnode.
-		 */
-		error = msdosfs_fsync_internal(vp, args->waitfor==MNT_WAIT, 0, args->context);
-
-		if (error)
-			args->error = error;
-	}
-	return (VNODE_RETURNED);
+	if (dep == NULL)
+		return VNODE_RETURNED;
+		
+	args = (struct msdosfs_sync_cargs *)cargs;
+	
+	/*
+	 * If this is a FAT vnode, then don't sync it here.  It will be sync'ed
+	 * separately in msdosfs_sync.
+	 */
+	if (vnode_issystem(vp))
+		return VNODE_RETURNED;
+	
+	lck_mtx_lock(dep->de_lock);
+	
+	error = msdosfs_fsync_internal(vp, args->waitfor, 0, args->context);
+	if (error)
+		args->error = error;
+		
+	lck_mtx_unlock(dep->de_lock);
+	
+	return VNODE_RETURNED;
 }
 
 
@@ -946,18 +1185,22 @@ msdosfs_sync(mp, waitfor, context)
 	struct msdosfsmount *pmp = VFSTOMSDOSFS(mp);
 	int error, allerror = 0;
 	struct msdosfs_sync_cargs args;
-        
+
 	/*
-	 * If we ever switch to not updating all of the fats all the time,
-	 * this would be the place to update them from the first one.
+	 * Flush the FSInfo sector and all copies of the FAT.
 	 */
-	if (pmp->pm_fmod != 0) {
-		if (pmp->pm_flags & MSDOSFSMNT_RONLY)
-			panic("msdosfs_sync: rofs mod");
-		else {
-			/* update fats here */
-		}
-	}
+	error = msdosfs_update_fsinfo(pmp, waitfor, context);
+	if (error)
+		allerror = error;
+
+	error = VNOP_FSYNC(pmp->pm_fat_active_vp, waitfor, context);
+	if (error)
+		allerror = error;
+	if (pmp->pm_fat_mirror_vp)
+		error = VNOP_FSYNC(pmp->pm_fat_mirror_vp, waitfor, context);
+	if (error)
+		allerror = error;
+	
 	/*
 	 * Write back each (modified) denode.
 	 */
@@ -975,7 +1218,7 @@ msdosfs_sync(mp, waitfor, context)
 		allerror = args.error;
 
 	/*
-	 * Flush filesystem control info, including the FATs, FSInfo sector, and directories.
+	 * Flush directories.
 	 */
 	error = VNOP_FSYNC(pmp->pm_devvp, waitfor, context);
 	if (error)
@@ -1003,30 +1246,42 @@ struct vfsops msdosfs_vfsops = {
 };
 
 extern struct vnodeopv_desc msdosfs_vnodeop_opv_desc;
-static struct vnodeopv_desc *msdosfs_vnodeop_opv_desc_list[1] =
+extern struct vnodeopv_desc msdosfs_fat_vnodeop_opv_desc;
+static struct vnodeopv_desc *msdosfs_vnodeop_opv_desc_list[2] =
 {
-	&msdosfs_vnodeop_opv_desc
+	&msdosfs_vnodeop_opv_desc,
+	&msdosfs_fat_vnodeop_opv_desc
 };
 
 
 static vfstable_t msdosfs_vfsconf;
 
 __private_extern__ int
-msdosfs_module_start(struct kmod_info_t *ki, void *data)
+msdosfs_module_start(kmod_info_t *ki, void *data)
 {
+#pragma unused(ki)
 #pragma unused(data)
 	errno_t error;
 	struct vfs_fsentry vfe;
 	
 	vfe.vfe_vfsops = &msdosfs_vfsops;
-	vfe.vfe_vopcnt = 1;		/* We just have vnode operations for regular files and directories */
+	vfe.vfe_vopcnt = 2;		/* We just have vnode operations for regular files and directories, and the FAT */
 	vfe.vfe_opvdescs = msdosfs_vnodeop_opv_desc_list;
-	strcpy(vfe.vfe_fsname, "msdos");
-	vfe.vfe_flags = VFS_TBLNOTYPENUM | VFS_TBLLOCALVOL | VFS_TBL64BITREADY;
+	strlcpy(vfe.vfe_fsname, "msdos", sizeof(vfe.vfe_fsname));
+	vfe.vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLNOTYPENUM | VFS_TBLLOCALVOL | VFS_TBL64BITREADY;
 	vfe.vfe_reserv[0] = 0;
 	vfe.vfe_reserv[1] = 0;
 	
 	error = vfs_fsadd(&vfe, &msdosfs_vfsconf);
+
+#if DEBUG
+	if (!error)
+	{
+		sysctl_register_oid(&sysctl__vfs_generic_msdosfs);
+		sysctl_register_oid(&sysctl__vfs_generic_msdosfs_meta_delay);
+	}
+#endif
+
 	return error ? KERN_FAILURE : KERN_SUCCESS;
 }
 
@@ -1035,15 +1290,21 @@ msdosfs_module_stop(kmod_info_t *ki, void *data)
 {
 #pragma unused(ki)
 #pragma unused(data)
-	errno_t error;
+    errno_t error;
 
-	error = vfs_fsremove(msdosfs_vfsconf);
-	if (error == 0)
-		msdosfs_uninit();
-
-	return error ? KERN_FAILURE : KERN_SUCCESS;
+    error = vfs_fsremove(msdosfs_vfsconf);
+    
+    if (!error)
+    {
+	msdosfs_uninit();
+#if DEBUG
+	sysctl_unregister_oid(&sysctl__vfs_generic_msdosfs_meta_delay);
+	sysctl_unregister_oid(&sysctl__vfs_generic_msdosfs);
+#endif
+    }
+    
+    return error ? KERN_FAILURE : KERN_SUCCESS;
 }
-
 
 
 /*
@@ -1054,13 +1315,13 @@ static int get_root_label(struct mount *mp, vfs_context_t context)
 {
     int error;
     struct msdosfsmount *pmp;
-    vnode_t rootvp = NULL;
+    vnode_t vp = NULL;
     struct buf *bp = NULL;
     u_long frcn;	/* file relative cluster number in root directory */
     daddr64_t bn;		/* block number of current dir block */
     u_long cluster;	/* cluster number of current dir block */
     u_long blsize;	/* size of current dir block */
-    int blkoff;		/* dir entry offset within current dir block */
+    unsigned blkoff;		/* dir entry offset within current dir block */
     struct dosdirentry *dep = NULL;
     struct denode *root;
     u_int16_t unichars;
@@ -1072,13 +1333,13 @@ static int get_root_label(struct mount *mp, vfs_context_t context)
 
     pmp = VFSTOMSDOSFS(mp);
 
-    error = msdosfs_root(mp, &rootvp, context);
+    error = msdosfs_root(mp, &vp, context);
     if (error)
         return error;
-    root = VTODE(rootvp);
+    root = VTODE(vp);
     
     for (frcn=0; ; frcn++) {
-        error = pcbmap(root, frcn, 1, &bn, &cluster, &blsize, context);
+        error = pcbmap(root, frcn, 1, &bn, &cluster, &blsize);
         if (error)
             goto not_found;
 
@@ -1123,7 +1384,7 @@ static int get_root_label(struct mount *mp, vfs_context_t context)
                  * characters are an extension, and it will put a period before the
                  * extension.
                  */
-				for (i=0; i<11; i++) {
+				for (i=0; i<SHORT_NAME_LEN; i++) {
 					uc = dep->deName[i];
 					if (i==0 && uc == SLOT_E5)
 						uc = 0xE5;
@@ -1150,8 +1411,8 @@ not_found:
     if (bp)
         buf_brelse(bp);
 
-    if (rootvp)
-        vnode_put(rootvp);
+    if (vp)
+        vnode_put(vp);
 
     return error;
 }

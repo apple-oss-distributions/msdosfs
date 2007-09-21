@@ -4,6 +4,10 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>English</string>
+	<key>CFBundleGetInfoString</key>
+	<string></string>
+	<key>CFBundleIconFile</key>
+	<string></string>
 	<key>CFBundleIdentifier</key>
 	<string>com.apple.filesystems.util.msdos</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -13,11 +17,11 @@
 	<key>CFBundlePackageType</key>
 	<string>fs  </string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.4.1</string>
+	<string>1.5</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>1.4.1</string>
+	<string>1.5</string>
 	<key>FSMediaTypes</key>
 	<dict>
 		<key>DOS_FAT_12</key>
@@ -84,6 +88,22 @@
 			<key>FSProbeOrder</key>
 			<integer>1000</integer>
 		</dict>
+		<key>EBD0A0A2-B9E5-4433-87C0-68B6B72699C7</key>
+		<dict>
+			<key>FSMediaProperties</key>
+			<dict>
+				<key>Content Hint</key>
+				<string>EBD0A0A2-B9E5-4433-87C0-68B6B72699C7</string>
+				<key>Leaf</key>
+				<true/>
+			</dict>
+			<key>FSProbeArguments</key>
+			<string>-p</string>
+			<key>FSProbeExecutable</key>
+			<string>../../msdos.util</string>
+			<key>FSProbeOrder</key>
+			<integer>2000</integer>
+		</dict>
 		<key>Partitionless</key>
 		<dict>
 			<key>FSMediaProperties</key>
@@ -143,18 +163,107 @@
 			<string>DOS_FAT_32</string>
 			<key>FSFormatExecutable</key>
 			<string>../../../../../../sbin/newfs_msdos</string>
+			<key>FSFormatMaximumSize</key>
+			<integer>8796093022208</integer>
 			<key>FSFormatMinimumSize</key>
-			<integer>49152</integer>
+			<integer>32768</integer>
 			<key>FSMountArguments</key>
 			<string></string>
 			<key>FSMountExecutable</key>
 			<string>../../../../../../sbin/mount_msdos</string>
 			<key>FSName</key>
-			<string>MS-DOS</string>
+			<string>MS-DOS (FAT)</string>
 			<key>FSRepairArguments</key>
 			<string>-y</string>
 			<key>FSRepairExecutable</key>
 			<string>../../../../../../sbin/fsck_msdos</string>
+			<key>FSVerificationArguments</key>
+			<string>-n</string>
+			<key>FSVerificationExecutable</key>
+			<string>../../../../../../sbin/fsck_msdos</string>
+		</dict>
+		<key>MS-DOS FAT12</key>
+		<dict>
+			<key>FSFormatArguments</key>
+			<string>-F 12</string>
+			<key>FSFormatContentMask</key>
+			<string>DOS_FAT_12</string>
+			<key>FSFormatExecutable</key>
+			<string>../../../../../../sbin/newfs_msdos</string>
+			<key>FSFormatMaximumSize</key>
+			<integer>133169152</integer>
+			<key>FSFormatMinimumSize</key>
+			<integer>32768</integer>
+			<key>FSMountArguments</key>
+			<string></string>
+			<key>FSMountExecutable</key>
+			<string>../../../../../../sbin/mount_msdos</string>
+			<key>FSName</key>
+			<string>MS-DOS (FAT12)</string>
+			<key>FSRepairArguments</key>
+			<string>-y</string>
+			<key>FSRepairExecutable</key>
+			<string>../../../../../../sbin/fsck_msdos</string>
+			<key>FSSubType</key>
+			<integer>0</integer>
+			<key>FSVerificationArguments</key>
+			<string>-n</string>
+			<key>FSVerificationExecutable</key>
+			<string>../../../../../../sbin/fsck_msdos</string>
+		</dict>
+		<key>MS-DOS FAT16</key>
+		<dict>
+			<key>FSFormatArguments</key>
+			<string>-F 16</string>
+			<key>FSFormatContentMask</key>
+			<string>DOS_FAT_16</string>
+			<key>FSFormatExecutable</key>
+			<string>../../../../../../sbin/newfs_msdos</string>
+			<key>FSFormatMaximumSize</key>
+			<integer>2147483648</integer>
+			<key>FSFormatMinimumSize</key>
+			<integer>4299161</integer>
+			<key>FSMountArguments</key>
+			<string></string>
+			<key>FSMountExecutable</key>
+			<string>../../../../../../sbin/mount_msdos</string>
+			<key>FSName</key>
+			<string>MS-DOS (FAT16)</string>
+			<key>FSRepairArguments</key>
+			<string>-y</string>
+			<key>FSRepairExecutable</key>
+			<string>../../../../../../sbin/fsck_msdos</string>
+			<key>FSSubType</key>
+			<integer>1</integer>
+			<key>FSVerificationArguments</key>
+			<string>-n</string>
+			<key>FSVerificationExecutable</key>
+			<string>../../../../../../sbin/fsck_msdos</string>
+		</dict>
+		<key>MS-DOS FAT32</key>
+		<dict>
+			<key>FSFormatArguments</key>
+			<string>-F 32</string>
+			<key>FSFormatContentMask</key>
+			<string>DOS_FAT_32</string>
+			<key>FSFormatExecutable</key>
+			<string>../../../../../../sbin/newfs_msdos</string>
+			<key>FSFormatMaximumSize</key>
+			<integer>8796093022208</integer>
+			<key>FSFormatMinimumSize</key>
+			<integer>34603008</integer>
+			<key>FSMountArguments</key>
+			<string></string>
+			<key>FSMountExecutable</key>
+			<string>../../../../../../sbin/mount_msdos</string>
+			<key>FSName</key>
+			<string>MS-DOS (FAT32)</string>
+			<key>FSRepairArguments</key>
+			<string>-y</string>
+			<key>FSRepairExecutable</key>
+			<string>../../../../../../sbin/fsck_msdos</string>
+			<key>FSSubType</key>
+			<integer>2</integer>
 			<key>FSVerificationArguments</key>
 			<string>-n</string>
 			<key>FSVerificationExecutable</key>

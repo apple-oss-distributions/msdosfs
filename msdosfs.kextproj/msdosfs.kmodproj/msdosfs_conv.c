@@ -126,7 +126,7 @@ static __inline u_int8_t find_lcode __P((u_int16_t code, u_int16_t *u2w));
  * throughout the year.  Of course, the GUI would have to do the opposite
  * conversion when converting to local time for display to the user.
  */
-long msdos_secondsWest = 0;
+__private_extern__ long msdos_secondsWest = 0;
 
 /*
  * Convert the unix version of time to dos's idea of time to be used in
@@ -500,7 +500,7 @@ unicode2dos(uc)
  */
 __private_extern__ int
 dos2unicodefn(dn, un, lower)
-	u_char dn[11];
+	u_char dn[SHORT_NAME_LEN];
 	u_int16_t *un;
 	int lower;
 {
@@ -582,7 +582,7 @@ dos2unicodefn(dn, un, lower)
  * names only if all characters are pure ASCII.
  */
 __private_extern__ int
-unicode2dosfn(const u_int16_t *un, u_char dn[12], int unlen, u_int gen, u_int8_t *lower_case)
+unicode2dosfn(const u_int16_t *un, u_char dn[SHORT_NAME_LEN], int unlen, u_int gen, u_int8_t *lower_case)
 {
 	int i, j, l;
 	int conv = 1;
@@ -597,9 +597,8 @@ unicode2dosfn(const u_int16_t *un, u_char dn[12], int unlen, u_int gen, u_int8_t
 	 * Fill the dos filename string with blanks. These are DOS's pad
 	 * characters.
 	 */
-	for (i = 0; i < 11; i++)
+	for (i = 0; i < SHORT_NAME_LEN; i++)
 		dn[i] = ' ';
-	dn[11] = 0;
 
 	/*
 	 * The filenames "." and ".." are handled specially, since they
@@ -650,7 +649,7 @@ unicode2dosfn(const u_int16_t *un, u_char dn[12], int unlen, u_int gen, u_int8_t
 			l = dp1 - dp;
 		else
 			l = unlen - (dp - un);
-		for (case_flags = i = 0, j = 8; i < l && j < 11; i++, j++) {
+		for (case_flags = i = 0, j = 8; i < l && j < SHORT_NAME_LEN; i++, j++) {
 			c = dp[i];
 			if (c < 0x80)
 				case_flags |= ascii_case[c];
@@ -973,7 +972,7 @@ getunicodefn(wep, ucfn, unichars, chksum)
 	int chksum;
 {
 	u_int8_t *cp;
-	u_int16_t *np, *ep = unichars + WIN_MAXLEN;
+	u_int16_t *np, *ep = ucfn + WIN_MAXLEN;
 	u_int16_t code;
 	int i;
 
@@ -1090,7 +1089,7 @@ winChksum(name)
 	int i;
 	u_int8_t s;
 
-	for (s = 0, i = 11; --i >= 0; s += *name++)
+	for (s = 0, i = SHORT_NAME_LEN; --i >= 0; s += *name++)
 		s = (s << 7)|(s >> 1);
 	return s;
 }
@@ -1103,6 +1102,7 @@ winSlotCnt(un, unlen)
 	const u_int16_t *un;
 	int unlen;
 {
+#pragma unused (un)
 	if (unlen > WIN_MAXLEN)
 		return 0;
 	return howmany(unlen, WIN_CHARS);
