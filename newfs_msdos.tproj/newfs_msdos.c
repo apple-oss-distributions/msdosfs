@@ -54,6 +54,8 @@
 #include <sys/stat.h>
 #include <sys/disklabel.h>
 #include <sys/mount.h>
+#include <sys/ioctl.h>
+#include <sys/disk.h>
 
 #include <ctype.h>
 #include <err.h>
@@ -306,11 +308,11 @@ static void usage(void);
 int
 main(int argc, char *argv[])
 {
-    static char opts[] = "NB:F:I:O:S:a:b:c:e:f:h:i:k:m:n:o:r:s:u:v:";
+    static char opts[] = "NB:F:I:O:S:P:a:b:c:e:f:h:i:k:m:n:o:r:s:u:v:";
     static const char *opt_B, *opt_v, *opt_O, *opt_f;
     static u_int opt_F, opt_I, opt_S, opt_a, opt_b, opt_c, opt_e;
     static u_int opt_h, opt_i, opt_k, opt_m, opt_n, opt_o, opt_r;
-    static u_int opt_s, opt_u;
+    static u_int opt_s, opt_u, opt_P;
     static int opt_N;
     static int Iflag, mflag, oflag;
     char buf[MAXPATHLEN];
@@ -358,6 +360,9 @@ main(int argc, char *argv[])
 	case 'S':
 	    opt_S = argto2(optarg, 1, "bytes/sector");
 	    break;
+	case 'P':
+	    opt_P = argto2(optarg, 1, "physical bytes/sector");
+	    break;
 	case 'a':
 	    opt_a = argto4(optarg, 1, "sectors/FAT");
 	    break;
@@ -399,7 +404,7 @@ main(int argc, char *argv[])
 	    opt_r = argto2(optarg, 1, "reserved sectors");
 	    break;
 	case 's':
-	    opt_s = argto4(optarg, 1, "file system size");
+	    opt_s = argto4(optarg, 1, "file system size (in sectors)");
 	    break;
 	case 'u':
 	    opt_u = argto2(optarg, 1, "sectors/track");
@@ -460,6 +465,21 @@ main(int argc, char *argv[])
     if (bpb.bps > MAXBPS)
 	errx(1, "bytes/sector (%u) is too large; maximum is %u",
 	     bpb.bps, MAXBPS);
+    if (opt_P != 0 && !powerof2(opt_P))
+	errx(1, "physical bytes/sector (%u) is not a power of 2", opt_P);
+    if (opt_P != 0 && opt_P < bpb.bps)
+	errx(1, "physical bytes/sector (%u) is less than logical bytes/sector (%u)", opt_P, bpb.bps);
+    if (opt_P == 0) {
+	uint32_t phys_block_size;
+	
+	if (ioctl(fd, DKIOCGETPHYSICALBLOCKSIZE, &phys_block_size) == -1) {
+	    printf("ioctl(DKIOCGETPHYSICALBLOCKSIZE) not supported\n");
+	    opt_P = bpb.bps;
+	} else {
+	    printf("%u bytes per physical sector\n", phys_block_size);
+	    opt_P = phys_block_size;
+	}
+    }
     if (!(fat = opt_F)) {
 	if (opt_f)
 	    fat = 12;
@@ -667,6 +687,16 @@ main(int argc, char *argv[])
 		 bpb.bps * NPB);
     if (!bpb.bspf) {
 	bpb.bspf = x2;
+	
+	/* Round up bspf to a multiple of physical sector size */
+	if (opt_P > bpb.bps) {
+	    u_int phys_per_log = opt_P / bpb.bps;
+	    u_int remainder = bpb.bspf % phys_per_log;
+	    if (remainder) {
+		bpb.bspf += phys_per_log - remainder;
+	    }
+	}
+	
 	x1 += (bpb.bspf - 1) * bpb.nft;
     }
     cls = (bpb.bsec - x1) / bpb.spc;
@@ -782,7 +812,7 @@ main(int argc, char *argv[])
 			  (u_int)tm->tm_min));
 		mk4(bsx->volid, x);
 		mklabel(bsx->label, opt_v ? opt_v : "NO NAME");
-		sprintf(buf, "FAT%u", fat);
+		snprintf(buf, sizeof(buf), "FAT%u", fat);
 		setstr(bsx->type, buf, sizeof(bsx->type));
 		if (!opt_B) {
 		    x1 += sizeof(struct bsx);
@@ -901,6 +931,19 @@ getdiskinfo(int fd, const char *fname, const char *dtype, int oflag,
 		warn("ioctl (GDINFO)");
 		errx(1, "%s: can't figure out partition info", fname);
 	}
+
+	/*
+	 * If bytes-per-sector was explicitly specified, but total number of
+	 * sectors was not explicitly specified, then find out how many sectors
+	 * of the given size would fit into the given partition (calculate the
+	 * size of the partition in bytes, and divide by the desired bytes per
+	 * sector).
+	 *
+	 * This makes it possible to create a disk image, and format it in
+	 * preparation for copying to a device with a different sector size.
+	 */
+	if (bpb->bps && !bpb->bsec)
+		bpb->bsec = (u_int64_t) (lab.d_partitions[0].p_size) * lab.d_secsize / bpb->bps;
 
 	if (!oflag)
 		bpb->hid = lab.d_partitions[0].p_offset;
@@ -1028,6 +1071,7 @@ usage(void)
     fprintf(stderr, "\t-I volume ID\n");
     fprintf(stderr, "\t-O OEM string\n");
     fprintf(stderr, "\t-S bytes/sector\n");
+    fprintf(stderr, "\t-P physical bytes/sector\n");
     fprintf(stderr, "\t-a sectors/FAT\n");
     fprintf(stderr, "\t-b block size\n");
     fprintf(stderr, "\t-c sectors/cluster\n");
@@ -1040,7 +1084,7 @@ usage(void)
     fprintf(stderr, "\t-n number of FATs\n");
     fprintf(stderr, "\t-o hidden sectors\n");
     fprintf(stderr, "\t-r reserved sectors\n");
-    fprintf(stderr, "\t-s file system size (sectors)\n");
+    fprintf(stderr, "\t-s file system size (in sectors)\n");
     fprintf(stderr, "\t-u sectors/track\n");
     fprintf(stderr, "\t-v filesystem/volume name\n");
     exit(1);
