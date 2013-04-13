@@ -558,15 +558,11 @@ int msdosfs_mount(vnode_t devvp, struct mount *mp, vfs_context_t context)
 		}
 		if (total_sectors < 0x10000 && getuint16(b50->bpbSectors) == 0)
 		{
-			printf("msdosfs_mount: FAT12/16 total sectors (%u) fit in 16 bits, but stored in 32 bits\n", total_sectors);
-			error = EINVAL;
-			goto error_exit;
+			printf("msdosfs_mount: Warning: FAT12/16 total sectors (%u) fit in 16 bits, but stored in 32 bits\n", total_sectors);
 		}
 		if (getuint16(b50->bpbFATsecs) == 0)
 		{
-			printf("msdosfs_mount: FAT12/16 has 32-bit FAT sectors\n");
-			error = EINVAL;
-			goto error_exit;
+			printf("msdosfs_mount: Warning: FAT12/16 has 32-bit FAT sectors\n");
 		}
 	}
 	
@@ -602,7 +598,7 @@ int msdosfs_mount(vnode_t devvp, struct mount *mp, vfs_context_t context)
 			goto error_exit;
 		}
 		
-		uint32_t maxcluster = (block_count - pmp->pm_firstcluster) / SecPerClust + 1;
+		uint32_t maxcluster = (uint32_t)((block_count - pmp->pm_firstcluster) / SecPerClust + 1);
 		if (maxcluster < pmp->pm_maxcluster)
 		{
 			printf("msdosfs_mount: device sector count (%llu) is less than volume sector count (%u); limiting maximum cluster to %u (was %u)\n",
@@ -661,7 +657,7 @@ int msdosfs_mount(vnode_t devvp, struct mount *mp, vfs_context_t context)
 			pmp->pm_iosize = pmp->pm_bpcluster;
 	}
 	
-	/* Copy volume label from boot sector into mount point */
+	/* Copy volume label and serial number from boot sector into mount point */
 	{
 		struct extboot *extboot;
 		int i;
@@ -677,6 +673,11 @@ int msdosfs_mount(vnode_t devvp, struct mount *mp, vfs_context_t context)
 		}
 		
 		if (extboot->exBootSignature == EXBOOTSIG) {
+			pmp->pm_flags |= MSDOSFS_HAS_EXT_BOOT;
+			
+			/* Copy the volume serial number into the mount point. */
+			bcopy(extboot->exVolumeID, pmp->pm_volume_serial_num, sizeof(pmp->pm_volume_serial_num));
+			
 			/*
 			 * Copy the label from the boot sector into the mount point.
 			 *
@@ -1283,7 +1284,7 @@ int msdosfs_vfs_setattr(mount_t mp, struct vfs_attr *attr, vfs_context_t context
 	{
 	    struct buf *bp = NULL;
 	    size_t i;
-	    int len;
+	    size_t len;
 	    size_t unichars;
 		u_int16_t c;
 	    u_int16_t volName[SHORT_NAME_LEN];

@@ -115,6 +115,7 @@ struct msdosfsmount {
 	u_int pm_fatdiv;	/*	offset computation */
 	u_int pm_curfat;	/* current fat for FAT32 (0 otherwise) */
 	u_int pm_flags;		/* see below */
+	char pm_volume_serial_num[4];	/* Volume serial number (ID) from boot block. */
 	u_int8_t pm_label[64];	/* Volume name/label */
 	uint32_t pm_label_cluster; /* logical cluster within root that contains the label */
 	uint32_t pm_label_offset;	/* byte offset of label within above cluster */
@@ -192,13 +193,13 @@ enum {
  * Convert file offset to number of clusters
  */
 #define de_cluster(pmp, off) \
-	((off) >> (pmp)->pm_cnshift)
+	((uint32_t)((off) >> (pmp)->pm_cnshift))
 
 /*
  * Clusters required to hold size bytes
  */
 #define	de_clcount(pmp, size) \
-	(((off_t)(size) + (pmp)->pm_bpcluster - 1) >> (pmp)->pm_cnshift)
+	((uint32_t)(((off_t)(size) + (pmp)->pm_bpcluster - 1) >> (pmp)->pm_cnshift))
 
 /*
  * Convert file offset to first block number of cluster containing offset.
@@ -287,6 +288,7 @@ struct msdosfs_args {
 #define	MSDOSFSMNT_WAITONFAT	0x40000000	/* mounted synchronous	*/
 #define	MSDOSFS_FATMIRROR		0x20000000	/* FAT is mirrored */
 #define MSDOSFS_CORRUPT			0x10000000	/* Runtime corruption detected. */
+#define MSDOSFS_HAS_EXT_BOOT		0x08000000	/* Boot sector has "extended boot" fields. */
 
 #define MSDOSFS_ARGSMAGIC		0xe4eff301
 
