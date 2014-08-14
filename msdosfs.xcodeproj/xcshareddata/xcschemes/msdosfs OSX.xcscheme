@@ -14,9 +14,9 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "4D3DCB4708E084D400C78A0B"
-               BuildableName = "mount_msdos"
-               BlueprintName = "mount_msdos"
+               BlueprintIdentifier = "4D3DCB2008E084D300C78A0B"
+               BuildableName = "msdosfs OSX"
+               BlueprintName = "msdosfs OSX"
                ReferencedContainer = "container:msdosfs.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -29,15 +29,6 @@
       buildConfiguration = "Debug">
       <Testables>
       </Testables>
-      <MacroExpansion>
-         <BuildableReference
-            BuildableIdentifier = "primary"
-            BlueprintIdentifier = "4D3DCB4708E084D400C78A0B"
-            BuildableName = "mount_msdos"
-            BlueprintName = "mount_msdos"
-            ReferencedContainer = "container:msdosfs.xcodeproj">
-         </BuildableReference>
-      </MacroExpansion>
    </TestAction>
    <LaunchAction
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
@@ -48,15 +39,6 @@
       ignoresPersistentStateOnLaunch = "NO"
       debugDocumentVersioning = "YES"
       allowLocationSimulation = "YES">
-      <BuildableProductRunnable>
-         <BuildableReference
-            BuildableIdentifier = "primary"
-            BlueprintIdentifier = "4D3DCB4708E084D400C78A0B"
-            BuildableName = "mount_msdos"
-            BlueprintName = "mount_msdos"
-            ReferencedContainer = "container:msdosfs.xcodeproj">
-         </BuildableReference>
-      </BuildableProductRunnable>
       <AdditionalOptions>
       </AdditionalOptions>
    </LaunchAction>
@@ -66,15 +48,6 @@
       useCustomWorkingDirectory = "NO"
       buildConfiguration = "Release"
       debugDocumentVersioning = "YES">
-      <BuildableProductRunnable>
-         <BuildableReference
-            BuildableIdentifier = "primary"
-            BlueprintIdentifier = "4D3DCB4708E084D400C78A0B"
-            BuildableName = "mount_msdos"
-            BlueprintName = "mount_msdos"
-            ReferencedContainer = "container:msdosfs.xcodeproj">
-         </BuildableReference>
-      </BuildableProductRunnable>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">
