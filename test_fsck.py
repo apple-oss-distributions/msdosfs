@@ -1,3 +1,4 @@
+# coding=utf-8
 #
 # Run a variety of tests against fsck_msdos
 #
@@ -35,6 +36,12 @@ class FailureExpected(Exception):
 		self.s = s
 	def __str__(self):
 		return self.s
+
+class RepairFailed(Exception):
+	def __init__(self, s):
+		self.s = s
+	def __str__(self):
+		return "RepairFailed({0})".format(self.s)
 
 #
 # launch -- A helper to run another process and collect the standard output
@@ -135,7 +142,7 @@ def test_fat16(dir, fsck, newfs):
 	dmg = os.path.join(dir, 'Test160MB.dmg')
 	f = file(dmg, "w")
 	f.truncate(160*1024*1024)
-	f.close
+	f.close()
 	newfs_opts = "-F 16 -b 4096 -v TEST160MB".split()
 	
 	#
@@ -193,7 +200,7 @@ def test_fat12(dir, fsck, newfs):
 	dmg = os.path.join(dir, 'Test15MB.dmg')
 	f = file(dmg, "w")
 	f.truncate(15*1024*1024)
-	f.close
+	f.close()
 	newfs_opts = "-F 12 -b 4096 -v TEST15MB".split()
 	
 	#
@@ -229,6 +236,40 @@ def test_fat12(dir, fsck, newfs):
 	fat_bad_0_or_1(rdisk, fsck, newfs, newfs_opts)
 	directory_garbage(rdisk, fsck, newfs, newfs_opts)
 	
+	#
+	# Detach the image
+	#
+	launch(['diskutil', 'eject', disk])
+	
+	#
+	# Delete the image file
+	#
+	os.remove(dmg)
+
+#
+# Run tests on 100MiB FAT12 image
+#
+def test_fat12_100MB(dir, fsck, newfs):	
+	#
+	# Create a 100MB disk image in @dir
+	#
+	dmg = os.path.join(dir, 'Test100MB.dmg')
+	f = file(dmg, "w")
+	f.truncate(100*1024*1024)
+	f.close()
+	newfs_opts = "-F 12 -b 32768 -v TEST100MB".split()
+	
+	#
+	# Attach the image
+	#
+	disk = launch(['hdiutil', 'attach', '-nomount', dmg], stdout=subprocess.PIPE)[0].rstrip()
+	rdisk = disk.replace('/dev/disk', '/dev/rdisk')
+	
+	#
+	# Run tests
+	#
+	test_18523205(rdisk, fsck, newfs, newfs_opts)
+		
 	#
 	# Detach the image
 	#
@@ -1081,8 +1122,11 @@ def test_fsinfo(disk, fsck, newfs, newfs_opts):
 	def bad_trailing_sig(bytes):
 		return bytes[0:508] + '\xff\x00\xaa\x55' + bytes[512:]
 		
-	def bad_free_count(bytes):
-		return bytes[0:488] + '\xfe\xed\xfa\xce' + bytes[492:]
+	def zero_free_count(bytes):
+		return bytes[0:488] + '\x00\x00\x00\x00' + bytes[492:]
+		
+	def unknown_free_count(bytes):
+		return bytes[0:488] + '\xFF\xFF\xFF\xFF' + bytes[492:]
 	
 	# Figure out where the FSInfo sector ended up
 	launch([newfs]+newfs_opts+[disk])
@@ -1094,7 +1138,7 @@ def test_fsinfo(disk, fsck, newfs, newfs_opts):
 	for func, reason in [(bad_leading_sig, "Bad leading signature"),
 			     (bad_sig2, "Bad structure signature"),
 			     (bad_trailing_sig, "Bad trailing signature"),
-			     (bad_free_count, "Bad free cluster count")]:
+			     ]:
 		launch([newfs]+newfs_opts+[disk])
 		with open(disk, "r+") as f:
 			f.seek(fsinfo * 512)
@@ -1111,6 +1155,31 @@ def test_fsinfo(disk, fsck, newfs, newfs_opts):
 
 		launch([fsck, '-y', disk])
 		launch([fsck, '-n', disk])
+
+	# Test the free cluster count field.  This minor error DOES NOT
+	# set the exit status, but it is repairable.
+	for func, reason, msg in [
+		(zero_free_count, "Zero free cluster count", "Free space in FSInfo block (0) not correct (5232654)\n"),
+		(unknown_free_count, "Unknown free cluster count","Free space in FSInfo block is unset (should be 5232654)\n")]:
+		launch([newfs]+newfs_opts+[disk])
+		with open(disk, "r+") as f:
+			f.seek(fsinfo * 512)
+			bytes = f.read(512)
+			f.seek(fsinfo * 512)
+			bytes = func(bytes)
+			f.write(bytes)
+		stdout,stderr = launch([fsck, '-n', disk], stdout=subprocess.PIPE)
+		sys.stdout.write(stdout)
+		if msg not in stdout:
+			raise FailureExpected(reason)
+		stdout,stderr = launch([fsck, '-y', disk], stdout=subprocess.PIPE)
+		sys.stdout.write(stdout)
+		if msg not in stdout:
+			raise FailureExpected(reason)
+		stdout,stderr = launch([fsck, '-n', disk], stdout=subprocess.PIPE)
+		sys.stdout.write(stdout)
+		if msg in stdout:
+			raise RepairFailed(reason)
 
 #
 # Test when the FAT has too few sectors for the number of clusters.
@@ -1207,6 +1276,29 @@ While some see them as the crazy ones, we see genius. Because the people who are
 	f.close()
     
 #
+# Test quick check and repair on a FAT12 volume with large cluster size.
+# See <rdar://problem/18523205> Alert "OSX can’t repair the disk XXX” appears when mount FAT12 storage
+#
+def test_18523205(disk, fsck, newfs, newfs_opts):
+	launch([newfs]+newfs_opts+[disk])
+	
+	# Create some subdirectories with children
+	with open(disk, "r+") as f:
+		v = msdosfs(f)
+		root = v.root()
+		
+		for i in range(10):
+			subdir = root.mkdir('Folder {}'.format(i))
+			subdir.mkfile('Child {}'.format(i), content='This is child number {}'.format(i))
+		
+		v.flush()
+
+	# Try quick check, verify and explicit repair	
+	launch([fsck, '-q', disk])
+	launch([fsck, '-n', disk])
+	launch([fsck, '-y', disk])
+
+#
 # When run as a script, run the test suite.
 #
 # Usage:
@@ -1235,5 +1327,6 @@ if __name__ == '__main__':
 	test_fat32(dir, fsck, newfs)
 	test_fat16(dir, fsck, newfs)
 	test_fat12(dir, fsck, newfs)
+	test_fat12_100MB(dir, fsck, newfs)
 	
 	print "\nSuccess!"
