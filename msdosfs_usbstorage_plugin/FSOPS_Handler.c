@@ -24,6 +24,7 @@
 
 // Maximum amount of a directory to read at one time
 #define   MAX_DIR_BLOCK_SIZE (128 * 1024)
+#define   MAX_DOS_BLOCKSIZE    4096
 #define   PRE_DEFINED_SECTOR_SIZE (512)
 //For taste, we need to verify that there isn'y any exfat signiture in the boot sector
 #define   EXFAT_SIGNITURE_LENGTH (11)
@@ -62,7 +63,7 @@ FSOPS_CreateRootRecord(FileSystemRecord_s *psFSRecord, NodeRecord_s** ppvRootNod
 
     // Create root NodeRecord
     iErr = FILERECORD_AllocateRecord(ppvRootNode, psFSRecord,
-                                     psFSRecord->sRootInfo.uRootCluster ,RECORD_IDENTIFIER_ROOT, NULL, "");
+                                     psFSRecord->sRootInfo.uRootCluster ,RECORD_IDENTIFIER_ROOT, NULL, "", 0, true);
     if ( iErr != 0 )
     {
         return iErr;
@@ -201,6 +202,12 @@ FSOPS_InitReadBootSectorAndSetFATType(void** ppvBootSector,FileSystemRecord_s *p
     struct byte_bpb50 *b50 = (struct byte_bpb50 *)boot->bs50.bsBPB;
     struct byte_bpb710 *b710 = (struct byte_bpb710 *)boot->bs710.bsBPB;
     
+    char cOEMName[9] = {0};
+    strlcpy(&cOEMName[0], (char *) boot->bs50.bsOemName , 8);
+    cOEMName[8] = '\0';
+    
+    MSDOS_LOG(LEVEL_DEFAULT, "FSOPS_InitReadBootSectorAndSetFATType: OEMName: %s\n", cOEMName);
+
     // The first three bytes are an Intel x86 jump instruction.  Windows only
     // checks the first byte, so that's what we'll do, too.
     
@@ -253,6 +260,12 @@ FSOPS_InitReadBootSectorAndSetFATType(void** ppvBootSector,FileSystemRecord_s *p
     
     if (uTotalSectors == 0)
     {
+        //check if we encountered special FAT case
+        if ((*((uint8_t*)(ppvBootSector + 0x42))) == 0x29 && (*((uint64_t*)(ppvBootSector + 0x52))) != 0)
+        {
+            MSDOS_LOG(LEVEL_ERROR, "Encountered special FAT where total sector location is 64bit. Not Supported\n");
+        }
+        
         *piErr = EINVAL;
         MSDOS_LOG(LEVEL_ERROR, "FSOPS_InitReadBootSectorAndSetFATType: invalid total sectors (%u)\n", uTotalSectors);
         return;
@@ -271,6 +284,8 @@ FSOPS_InitReadBootSectorAndSetFATType(void** ppvBootSector,FileSystemRecord_s *p
     psFSRecord->sRootInfo.uRootSector = uReservedSectors + (b50->bpbFATs * uFatSectors);
     psFSRecord->sRootInfo.uRootSize = (uRootEntryCount * sizeof(struct dosdirentry) + uBytesPerSector - 1) / uBytesPerSector;
     psFSRecord->sFSInfo.uClusterOffset = psFSRecord->sRootInfo.uRootSector + psFSRecord->sRootInfo.uRootSize;
+    // Set the metadata zone
+    psFSRecord->uMetadataZone = psFSRecord->sRootInfo.uRootSector * psFSRecord->sFSInfo.uBytesPerSector;
     
     if (uFatSectors > uTotalSectors ||
         psFSRecord->sRootInfo.uRootSector < uFatSectors ||           // Catch numeric overflow!
@@ -285,7 +300,7 @@ FSOPS_InitReadBootSectorAndSetFATType(void** ppvBootSector,FileSystemRecord_s *p
     // Usable clusters are numbered starting at 2, so the maximum usable cluster
     // is (number of clusters) + 1.  Convert the pm_firstcluster to device blocks.
     
-    psFSRecord->sFSInfo.uMaxCluster = (uTotalSectors - psFSRecord->sFSInfo.uClusterOffset) / uSectorsPerCluster + 1;
+    psFSRecord->sFSInfo.uMaxCluster = (uint32_t) ((uTotalSectors - psFSRecord->sFSInfo.uClusterOffset) / uSectorsPerCluster + 1);
     
     // Figure out the FAT type based on the number of clusters.
     if (psFSRecord->sFSInfo.uMaxCluster < (CLUST_RSRVD & FAT12_MASK))
@@ -344,7 +359,7 @@ FSOPS_InitReadBootSectorAndSetFATType(void** ppvBootSector,FileSystemRecord_s *p
 
         if (volume_serial_num[0] || volume_serial_num[1] || volume_serial_num[2] || volume_serial_num[3]) 
         {
-            FSOPS_generate_volume_uuid(psFSRecord->sFSInfo.sUUID, volume_serial_num, uTotalSectors); 
+            FSOPS_generate_volume_uuid(psFSRecord->sFSInfo.sUUID, volume_serial_num, (uint32_t) uTotalSectors); 
             psFSRecord->sFSInfo.bUUIDExist = true;
         }
 
@@ -445,7 +460,7 @@ FSOPS_InitReadBootSectorAndSetFATType(void** ppvBootSector,FileSystemRecord_s *p
      * NOTE: We have to do this AFTER determining the FAT type.  If we did this
      * before, we could end up deducing a different FAT type than what's actually
      * on disk, and that would be very bad. */
-    uint32_t clusters = uFatSectors * psFSRecord->sFSInfo.uBytesPerSector;     // Size of FAT in bytes
+    uint32_t clusters = uFatSectors * SECTOR_SIZE(psFSRecord);     // Size of FAT in bytes
     if (psFSRecord->sFatInfo.uFatMask == FAT32_MASK)
     {
         clusters /= 4;                                      // FAT32: 4 bytes per FAT entry
@@ -503,7 +518,7 @@ FSOPS_InitReadBootSectorAndSetFATType(void** ppvBootSector,FileSystemRecord_s *p
     }
     
     // Compute the size (in bytes) of the volume root directory.
-    psFSRecord->sRootInfo.uRootLength = (uint32_t) psFSRecord->sRootInfo.uRootSize * psFSRecord->sFSInfo.uBytesPerSector;
+    psFSRecord->sRootInfo.uRootLength = (uint32_t) psFSRecord->sRootInfo.uRootSize * SECTOR_SIZE(psFSRecord);
     if (psFSRecord->sFatInfo.uFatMask == FAT32_MASK)
     {
         uint32_t uNumClusters = 0;
@@ -524,16 +539,16 @@ FSOPS_InitReadBootSectorAndSetFATType(void** ppvBootSector,FileSystemRecord_s *p
     // the free cluster count.
     if (psFSRecord->sFSInfo.uFsInfoSector)
     {
-        psFSRecord->pvFSInfoCluster = malloc(psFSRecord->sFSInfo.uBytesPerSector);
+        psFSRecord->pvFSInfoCluster = malloc(SECTOR_SIZE(psFSRecord));
         if (psFSRecord->pvFSInfoCluster == NULL)
         {
             *piErr = ENOMEM;
             return;
         }
         
-        uint32_t uReadOffset = psFSRecord->sFSInfo.uFsInfoSector*psFSRecord->sFSInfo.uBytesPerSector;
+        uint32_t uReadOffset = psFSRecord->sFSInfo.uFsInfoSector * SECTOR_SIZE(psFSRecord);
 
-        if (pread(psFSRecord->iFD, psFSRecord->pvFSInfoCluster, psFSRecord->sFSInfo.uBytesPerSector, uReadOffset) != psFSRecord->sFSInfo.uBytesPerSector)
+        if (pread(psFSRecord->iFD, psFSRecord->pvFSInfoCluster, SECTOR_SIZE(psFSRecord), uReadOffset) != SECTOR_SIZE(psFSRecord))
         {
             *piErr = errno;
             MSDOS_LOG(LEVEL_ERROR, "FSOPS_InitReadBootSectorAndSetFATType: Error %d trying to read FSInfo sector; ignoring.\n",  *piErr);
@@ -628,8 +643,8 @@ static int FSOPS_UpdateFSInfoSector(FileSystemRecord_s *psFSRecord)
             putuint32(fsInfo->fsinxtfree, psFSRecord->sFSInfo.uFirstFreeCluster);
 
             //Flush the FSInfo sector into the device
-            uint32_t uFSInfoSectorOffset = psFSRecord->sFSInfo.uFsInfoSector*psFSRecord->sFSInfo.uBytesPerSector;
-            if (pwrite(psFSRecord->iFD, psFSRecord->pvFSInfoCluster, psFSRecord->sFSInfo.uBytesPerSector, uFSInfoSectorOffset) != psFSRecord->sFSInfo.uBytesPerSector)
+            uint32_t uFSInfoSectorOffset = psFSRecord->sFSInfo.uFsInfoSector*  SECTOR_SIZE(psFSRecord);
+            if (pwrite(psFSRecord->iFD, psFSRecord->pvFSInfoCluster, SECTOR_SIZE(psFSRecord), uFSInfoSectorOffset) != SECTOR_SIZE(psFSRecord))
             {
                 iError = errno;
                 MSDOS_LOG(LEVEL_ERROR, "FSOPS_UpdateFSInfoSector: Error %d trying to write FSInfo sector\n",  iError);
@@ -655,7 +670,7 @@ int FSOPS_FlushCacheAndFreeLck(FileSystemRecord_s* psFSRecord)
 {
     int iErr = FATMOD_FlushAllCacheEntries(psFSRecord);
 
-    //Acquire Read Lock
+    //Free Read Lock
     MultiReadSingleWrite_FreeRead(&psFSRecord->sDirtyBitLck);
 
     return iErr;
@@ -707,13 +722,57 @@ MSDOS_Taste (int iDiskFd)
      *
      *If Exfat signiture exsits in boot sector return failure
      */
-     union bootsector * psBootSector = (union bootsector *) pvBootSector;
+    union bootsector * psBootSector = (union bootsector *) pvBootSector;
     if (((psBootSector->bs50.bsJump[0] != 0xE9) && (psBootSector->bs50.bsJump[0] != 0xEB)) ||
-        !memcmp(pvBootSector, "\xEB\x76\x90""EXFAT   ", EXFAT_SIGNITURE_LENGTH))
+    !memcmp(pvBootSector, "\xEB\x76\x90""EXFAT   ", EXFAT_SIGNITURE_LENGTH))
+    {
+        iError = ENOTSUP;
+        goto exit;
+    }
+
+    /* It is possible that the above check could match a partition table, or some */
+    /* non-FAT disk meant to boot a PC.  Check some more fields for sensible values. */
+    struct byte_bpb33 *b33 = (struct byte_bpb33 *)psBootSector->bs33.bsBPB;
+    struct byte_bpb50 *b50 = (struct byte_bpb50 *)psBootSector->bs50.bsBPB;
+    struct byte_bpb710 *b710 = (struct byte_bpb710 *)psBootSector->bs710.bsBPB;
+
+    /* We only work with 512, 1024, 2048, and 4096 byte sectors */
+    uint16_t bps = getuint16(b33->bpbBytesPerSec);
+    if ((bps < 0x200) || (bps & (bps - 1)) || (bps > MAX_DOS_BLOCKSIZE))
+    {
+        iError = ENOTSUP;
+        goto exit;
+    }
+
+    /* Check to make sure valid sectors per cluster */
+    u_int8_t spc = b33->bpbSecPerClust;
+    if ((spc == 0 ) || (spc & (spc - 1)))
+    {
+        iError = ENOTSUP;
+        goto exit;
+    }
+
+    /* Make sure the number of FATs is OK; on NTFS, this will be zero */
+    if (b33->bpbFATs == 0)
+    {
+        iError = ENOTSUP;
+        goto exit;
+    }
+
+    /* Make sure the total sectors is non-zero */
+    if (getuint16(b33->bpbSectors) == 0 && getuint32(b50->bpbHugeSectors) == 0)
+    {
+        iError = ENOTSUP;
+        goto exit;
+    }
+
+    /* Make sure there is a root directory */
+    if (getuint16(b33->bpbRootDirEnts) == 0 && getuint32(b710->bpbRootClust) == 0)
     {
         iError = ENOTSUP;
     }
 
+exit:
     free(pvBootSector);
     return iError;
 }
@@ -742,6 +801,7 @@ MSDOS_ScanVolGetVolName(char* pcVolName, int iDiskFd)
 
     //Init chain cache
     FILERECORD_InitChainCache(psFSRecord);
+    DIROPS_InitDirEntryLockList(psFSRecord);
 
     // Sanity check the device's logical block size.
     if (ioctl(psFSRecord->iFD, DKIOCGETBLOCKSIZE, &uBytesPerSector) < 0)
@@ -767,16 +827,17 @@ MSDOS_ScanVolGetVolName(char* pcVolName, int iDiskFd)
     }
 
     // Create root NodeRecord
-    iError = FILERECORD_AllocateRecord(&pvRootNode, psFSRecord, psFSRecord->sRootInfo.uRootCluster ,RECORD_IDENTIFIER_ROOT, NULL, "");
+    iError = FILERECORD_AllocateRecord(&pvRootNode, psFSRecord, psFSRecord->sRootInfo.uRootCluster ,RECORD_IDENTIFIER_ROOT, NULL, "", 0, true);
     if ( iError != 0 )
     {
         goto end;
     }
-
+    
     // Set dir entry data to 'volume label' entry.
     LookForDirEntryArgs_s sArgs;
     sArgs.eMethod = LU_BY_VOLUME_ENTRY;
     NodeDirEntriesData_s sNodeDirEntriesData;
+    DIROPS_InitDirClusterDataCache(psFSRecord);
 
     iError = DIROPS_LookForDirEntry(pvRootNode, &sArgs, NULL, &sNodeDirEntriesData );
     if ( iError == 0 )
@@ -799,6 +860,12 @@ MSDOS_ScanVolGetVolName(char* pcVolName, int iDiskFd)
     else
         pcVolName[0] = '\0';
 
+    iError =  DIROPS_DereferenceDirEntrlyLockListEntry(pvRootNode, true);
+    if ( iError != 0 )
+    {
+        return iError;
+    }
+
 end:
     if (iError) {
         MSDOS_LOG(LEVEL_ERROR, "MSDOS_ScanVolGetVolName: failed with error %d, returning empty name and no error\n",iError);
@@ -808,6 +875,8 @@ end:
     if (pvRootNode) FILERECORD_FreeRecord(pvRootNode);
 
     FAT_Access_M_FATFini(psFSRecord);
+    DIROPS_DeInitDirEntryLockList(psFSRecord);
+    DIROPS_DeInitDirClusterDataCache(psFSRecord);
     if (psFSRecord->psClusterChainCache)
         FILERECORD_DeInitChainCache(psFSRecord);
 
@@ -840,7 +909,7 @@ MSDOS_ScanVols (int iDiskFd, UVFSScanVolsRequest *request, UVFSScanVolsReply *re
     // Tell UVFS that we have a single, non-access controlled volume.
     reply->sr_volid = 0;
     reply->sr_volac = UAC_UNLOCKED;
-
+    
     return MSDOS_ScanVolGetVolName(reply->sr_volname, iDiskFd);
 }
 
@@ -924,10 +993,11 @@ MSDOS_Mount (int iDiskFd, UVFSVolumeId volId, __unused UVFSMountFlags mountFlags
     psFSRecord->iFD = iDiskFd;
     
     // Init dir entry access locks.
-    MultiReadSingleWrite_Init( &psFSRecord->sDirEntryAccessLock );
     MultiReadSingleWrite_Init( &psFSRecord->sDirtyBitLck );
     MultiReadSingleWrite_Init( &psFSRecord->sDirHTLRUTableLock );
-    psFSRecord->uDirHTGeneration = 1;
+    DIROPS_InitDirEntryLockList(psFSRecord);
+
+    psFSRecord->uPreAllocatedOpenFiles = 0;
 
     //Init chain cache
     FILERECORD_InitChainCache(psFSRecord);
@@ -962,6 +1032,7 @@ MSDOS_Mount (int iDiskFd, UVFSVolumeId volId, __unused UVFSMountFlags mountFlags
     }
 
     DIAGNOSTIC_INIT(psFSRecord);
+    DIROPS_InitDirClusterDataCache(psFSRecord);
 
     // Create roothandle with root directory
     if (!FSOPS_CreateRootRecord(psFSRecord , &pvRootNode))
@@ -986,9 +1057,10 @@ free_all_and_fail:
         FILERECORD_DeInitChainCache(psFSRecord);
 
 free_Volume_and_fail:
-    MultiReadSingleWrite_DeInit( &psFSRecord->sDirEntryAccessLock );
     MultiReadSingleWrite_DeInit( &psFSRecord->sDirtyBitLck );
     MultiReadSingleWrite_DeInit( &psFSRecord->sDirHTLRUTableLock );
+    DIROPS_DeInitDirEntryLockList(psFSRecord);
+    DIROPS_DeInitDirClusterDataCache(psFSRecord);
     free(psFSRecord);
 end:
     
@@ -1015,11 +1087,11 @@ MSDOS_Sync (UVFSFileNode node)
         goto exit;
     }
 
-    // Clear drive dirty bit.
-    iErr = FATMOD_SetDriveDirtyBit( psFSRecord, false );
-    if ( iErr != 0 )
+    //We will set the device as not dirty, only if we
+    if (psFSRecord->uPreAllocatedOpenFiles == 0)
     {
-        goto exit;
+        // Clear drive dirty bit.
+        iErr = FATMOD_SetDriveDirtyBit( psFSRecord, false );
     }
 
 exit:
@@ -1050,17 +1122,18 @@ MSDOS_Unmount (UVFSFileNode rootFileNode, UVFSUnmountHint hint)
     iError = DIAGNOSTIC_DEINIT(psFSRecord);
 
     // Deinit dir entry access locks.
-    MultiReadSingleWrite_DeInit( &psFSRecord->sDirEntryAccessLock );
     MultiReadSingleWrite_DeInit( &psFSRecord->sDirtyBitLck );
     MultiReadSingleWrite_DeInit( &psFSRecord->sDirHTLRUTableLock );
+    DIROPS_DeInitDirEntryLockList(psFSRecord);
+    DIROPS_DeInitDirClusterDataCache(psFSRecord);
     
-    //Free FS Record
+    //Free chain cache
     FILERECORD_DeInitChainCache(psFSRecord);
 
     //Free FSInfoSector
     if (psFSRecord->pvFSInfoCluster != NULL)
         free(psFSRecord->pvFSInfoCluster);
-
+    //Free FS Record
     free(psFSRecord);
     
     return iError;
@@ -1074,6 +1147,9 @@ MSDOS_GetFSAttr(UVFSFileNode Node, const char *attr, UVFSFSAttributeValue *val, 
 
     NodeRecord_s* psNodeRecord      = (NodeRecord_s*)Node;
 
+    if (attr == NULL || val == NULL)
+        return EINVAL;
+    
     if (strcmp(attr, UVFS_FSATTR_PC_LINK_MAX)==0) 
     {
         *retlen = sizeof(uint64_t);
@@ -1324,9 +1400,24 @@ MSDOS_GetFSAttr(UVFSFileNode Node, const char *attr, UVFSFSAttributeValue *val, 
 }
 
 static int
-MSDOS_SetFSAttr(UVFSFileNode Node, const char *attr, const UVFSFSAttributeValue *val, size_t len)
+MSDOS_SetFSAttr(UVFSFileNode Node, const char *attr, const UVFSFSAttributeValue *val, size_t len, UVFSFSAttributeValue *out_value, size_t out_len)
 {
     VERIFY_NODE_IS_VALID(Node);
+    
+    if (attr == NULL || val == NULL || out_value == NULL) return EINVAL;
+    
+    if (strcmp(attr, LI_FSATTR_PREALLOCATE) == 0)
+    {
+        if (len < sizeof (LIFilePreallocateArgs_t) || out_len < sizeof (LIFilePreallocateArgs_t))
+            return EINVAL;
+        
+        LIFilePreallocateArgs_t* psPreAllocReq = (LIFilePreallocateArgs_t*) ((void *) val->fsa_opaque);
+        LIFilePreallocateArgs_t* psPreAllocRes = (LIFilePreallocateArgs_t*) ((void *) out_value->fsa_opaque);
+        
+        memcpy (psPreAllocRes, psPreAllocReq, sizeof(LIFilePreallocateArgs_t));
+        return FILEOPS_PreAllocateClusters(Node, psPreAllocReq, psPreAllocRes);
+    }
+    
     // Reserved for future use
     return ENOTSUP;
 }

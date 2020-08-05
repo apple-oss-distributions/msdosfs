@@ -21,6 +21,8 @@ class fsAttributesRef  {
     
     let attr = UnsafeMutableRawPointer.allocate(byteCount: K.SIZE.KBi, alignment: 1).bindMemory(to: UVFSFSAttributeValue.self, capacity: 1)
     var attrBufSize = K.SIZE.KBi //Indicate the allocation size of the above attr buffer, please note !!! changing the buffer size require changing also in here.
+    let out_attr = UnsafeMutableRawPointer.allocate(byteCount: K.SIZE.KBi, alignment: 1).bindMemory(to: UVFSFSAttributeValue.self, capacity: 1)
+    var out_attrBufSize = K.SIZE.KBi //Indicate the allocation size of the above attr buffer, please note !!! changing the buffer size require changing also in here.
     var fsa_number  : UInt64    { return attr.pointee.fsa_number    }
     var fsa_bool    : Bool      { return attr.pointee.fsa_bool      }
     var sectorSize  : UInt32?
@@ -43,8 +45,8 @@ class fsAttributesRef  {
         UVFS_FSATTR_PC_LINK_MAX:        [1,1,1,1,1,1,1,1,1,1] ,
         UVFS_FSATTR_PC_NAME_MAX:        [K.FS.WIN_MAXLEN, K.FS.WIN_MAXLEN, K.FS.WIN_MAXLEN, K.FS.WIN_MAXLEN, K.FS.HFS_MAXLEN, K.FS.HFS_MAXLEN, K.FS.HFS_MAXLEN, K.FS.HFS_MAXLEN, K.FS.APFS_MAXLEN, K.FS.APFS_MAXLEN] ,
         UVFS_FSATTR_PC_NO_TRUNC:        [true, true, true, true, true, true, true, true, true, true] ,
-        UVFS_FSATTR_PC_FILESIZEBITS:    [33,33,33,64, 64, 64, 64, 64, 64, 64] ,
-        //            UVFS_FSATTR_PC_XATTR_SIZE_BITS: [nil,nil,nil,nil] ,
+        UVFS_FSATTR_PC_FILESIZEBITS:    [33,33,33,64, 64, 64, 64, 64, 57, 57] ,
+        UVFS_FSATTR_PC_XATTR_SIZE_BITS: [0, 0, 0, 0, 31, 31, 31, 31, 57, 57 ] ,
         //UVFS_FSATTR_BLOCKSIZE:          [4096, 2048, 512, 32768] ,
         
         //            UVFS_FSATTR_BLOCKSIZE:          [4096, 2048, 512, 4096] ,

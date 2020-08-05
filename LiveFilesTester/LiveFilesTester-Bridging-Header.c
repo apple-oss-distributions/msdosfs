@@ -122,11 +122,25 @@ int brdg_get_physical_block_size(int fildes, int *val){
                              Wrapping functions
  ******************************************************************************/
 
-int brdg_fsops_setfsattr(UVFSFSOps* testerFsOps, UVFSFileNode *Node, const char *attr, const UVFSFSAttributeValue *val, size_t len)
+int brdg_fsops_setfsattr(UVFSFSOps* testerFsOps, UVFSFileNode *Node, const char *attr, const UVFSFSAttributeValue *val, size_t len, UVFSFSAttributeValue *out_val, size_t out_len)
 {
     int errnum;
     clock_gettime(CLOCK_REALTIME, &tm1);
-    errnum = (*testerFsOps).fsops_setfsattr(*Node, attr, val, len);
+    errnum = (*testerFsOps).fsops_setfsattr(*Node, attr, val, len, out_val, out_len);
+    clock_gettime(CLOCK_REALTIME, &tm2);
+    elapsed_time = timespec_diff_in_ns(&tm1, &tm2);
+    logf("fsops_setfsattr return (%d) - %s\n", errnum,errnum==0?"SUCCESS":strerror(errnum));
+    return errnum;
+}
+
+int brdg_fsops_preallocate(UVFSFSOps* testerFsOps, UVFSFileNode *Node, size_t len)
+{
+    int errnum;
+    LIFilePreallocateArgs_t pre_alloc_req = {.flags = F_ALLOCATECONTIG | F_ALLOCATEALL, .length = len};
+    fstore_t pre_alloc_res = {0};
+
+    clock_gettime(CLOCK_REALTIME, &tm1);
+    errnum = (*testerFsOps).fsops_setfsattr(*Node, UVFS_FSATTR_PREALLOCATE, (UVFSFSAttributeValue* )((void*) &pre_alloc_req), sizeof(LIFilePreallocateArgs_t), (UVFSFSAttributeValue* )((void*)&pre_alloc_res), sizeof(fstore_t));
     clock_gettime(CLOCK_REALTIME, &tm2);
     elapsed_time = timespec_diff_in_ns(&tm1, &tm2);
     logf("fsops_setfsattr return (%d) - %s\n", errnum,errnum==0?"SUCCESS":strerror(errnum));
@@ -445,6 +459,11 @@ char *brdg_strerror(int errnum)
 size_t get_direntry_reclen(uint32_t namelen)
 {
     return UVFS_DIRENTRY_RECLEN(namelen);
+}
+
+size_t get_min_dea_reclen(uint32_t namelen)
+{
+    return _UVFS_DIRENTRYATTR_RECLEN(UVFS_DIRENTRYATTR_NAMEOFF, namelen);
 }
 
 size_t get_dea_reclen(UVFSDirEntryAttr dea , uint32_t namelen)
