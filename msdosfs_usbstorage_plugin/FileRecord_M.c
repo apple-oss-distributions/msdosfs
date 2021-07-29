@@ -15,8 +15,6 @@
 #include "Logger.h"
 #include "Naming_Hash.h"
 
-#define GET_ENTRY_END(entry, fsRecord) (entry->uFileOffset + (uint64_t) ((uint64_t)entry->uAmountOfClusters * CLUSTER_SIZE(fsRecord)))
-
 /* ------------------------------------------------------------------------------------------
  *                                  File Record operations
  * ------------------------------------------------------------------------------------------ */
@@ -125,11 +123,13 @@ FILERECORD_AllocateRecord(NodeRecord_s** ppvNode, FileSystemRecord_s *psFSRecord
         pthread_mutexattr_t sAttr;
         pthread_mutexattr_init(&sAttr);
         pthread_mutexattr_settype(&sAttr, PTHREAD_MUTEX_ERRORCHECK);
-        pthread_mutex_init(&(*ppvNode)->sRecordData.sUnAlignedWriteLck, &sAttr);
         
-        for (int iCond = 0; iCond < NUM_OF_COND; iCond++) {
-            pthread_cond_init( &(*ppvNode)->sRecordData.sCondTable[iCond].sCond, NULL );
-            (*ppvNode)->sRecordData.sCondTable[iCond].uSectorNum = 0;
+        if (eRecordID == RECORD_IDENTIFIER_FILE) {
+            pthread_mutex_init(&(*ppvNode)->sExtraData.sFileData.sUnAlignedWriteLck, &sAttr);
+            for (int iCond = 0; iCond < NUM_OF_COND; iCond++) {
+                pthread_cond_init( &(*ppvNode)->sExtraData.sFileData.sCondTable[iCond].sCond, NULL );
+                (*ppvNode)->sExtraData.sFileData.sCondTable[iCond].uSectorNum = 0;
+            }
         }
         
         if (eRecordID != RECORD_IDENTIFIER_ROOT) {
@@ -197,7 +197,16 @@ exit_with_error:
 
 void FILERECORD_FreeRecord(NodeRecord_s* psNode)
 {
+wait_for_write_conter:
+    while (psNode->sExtraData.sFileData.uWriteCounter != 0) {
+        usleep(100);
+    }
+
     MultiReadSingleWrite_LockWrite( &psNode->sRecordData.sRecordLck );
+    if (psNode->sExtraData.sFileData.uWriteCounter != 0) {
+        MultiReadSingleWrite_FreeWrite( &psNode->sRecordData.sRecordLck );
+        goto wait_for_write_conter;
+    }
     FILERECORD_EvictAllFileChainCacheEntriesFromGivenOffset(psNode, 0, true);
     MultiReadSingleWrite_FreeWrite( &psNode->sRecordData.sRecordLck );
 
@@ -216,10 +225,12 @@ void FILERECORD_FreeRecord(NodeRecord_s* psNode)
     //Deinit locks
     DIROPS_DereferenceDirEntrlyLockListEntry(psNode, false);
     MultiReadSingleWrite_DeInit(&psNode->sRecordData.sRecordLck);
-    pthread_mutex_destroy(&psNode->sRecordData.sUnAlignedWriteLck);
     
-    for (int iCond = 0; iCond < NUM_OF_COND; iCond++) {
-        pthread_cond_destroy( &psNode->sRecordData.sCondTable[iCond].sCond);
+    if (psNode->sRecordData.eRecordID == RECORD_IDENTIFIER_FILE) {
+        pthread_mutex_destroy(&psNode->sExtraData.sFileData.sUnAlignedWriteLck);
+        for (int iCond = 0; iCond < NUM_OF_COND; iCond++) {
+            pthread_cond_destroy( &psNode->sExtraData.sFileData.sCondTable[iCond].sCond);
+        }
     }
     
     // Invalidate magic
@@ -575,7 +586,7 @@ FILERECORD_FindClusterToCreateChainCacheEntry(bool* pbFoundLocation, NodeRecord_
     FileSystemRecord_s* psFSRecord = GET_FSRECORD(psNodeRecord);
     while (!(*pbFoundLocation))
     {
-        uint32_t NextCluster;
+        uint32_t NextCluster = 0;
         uint32_t uNewChainLength = FAT_Access_M_ContiguousClustersInChain(psFSRecord, *puWantedCluster, &NextCluster, &iError);
         if (iError || uNewChainLength == 0)
         {
@@ -783,7 +794,7 @@ FILERECORD_EvictAllFileChainCacheEntriesFromGivenOffset(NodeRecord_s* psNodeReco
 {
     FileSystemRecord_s* psFSRecord = GET_FSRECORD(psNodeRecord);
     // Lock Cache for write
-    if (bLock) CHAIN_CAHCE_ACCESS_LOCK(psFSRecord);
+    if (bLock) CHAIN_CACHE_ACCESS_LOCK(psFSRecord);
 
     ClusterChainCacheEntry_s* psClusterChainToEvict = TAILQ_FIRST(&psNodeRecord->sRecordData.psClusterChainList);
     ClusterChainCacheEntry_s* psClusterChainNext;
@@ -792,8 +803,8 @@ FILERECORD_EvictAllFileChainCacheEntriesFromGivenOffset(NodeRecord_s* psNodeReco
         //Calculate entry end offset
         psClusterChainNext = TAILQ_NEXT(psClusterChainToEvict, psClusterChainCacheListEntry);
 
-        //Evict only if entry start offset is after given offset
-        if (uOffsetToEvictFrom <= psClusterChainToEvict->uFileOffset ) {
+        //Evict any entry that ends after given offset
+        if (uOffsetToEvictFrom <= GET_ENTRY_END(psClusterChainToEvict, psFSRecord)) {
             FILERECORD_RemoveChainCacheEntry(psClusterChainToEvict);
         }
 
@@ -801,7 +812,7 @@ FILERECORD_EvictAllFileChainCacheEntriesFromGivenOffset(NodeRecord_s* psNodeReco
     }
 
     // Unlock Cache
-    if (bLock) CHAIN_CAHCE_ACCESS_FREE(psFSRecord);
+    if (bLock) CHAIN_CACHE_ACCESS_FREE(psFSRecord);
 }
 
 static void
@@ -883,7 +894,7 @@ FILERECORD_GetChainFromCache(NodeRecord_s* psNodeRecord, uint64_t uWantedOffsetI
     }
 
     //Lock the cache for write
-    CHAIN_CAHCE_ACCESS_LOCK(psFSRecord);
+    CHAIN_CACHE_ACCESS_LOCK(psFSRecord);
 
     *puWantedCluster = psNodeRecord->sRecordData.uFirstCluster;
     uint32_t uOffsetLocationInClusterChain = (uint32_t) (uWantedOffsetInFile/CLUSTER_SIZE(psFSRecord));
@@ -938,7 +949,7 @@ FILERECORD_GetChainFromCache(NodeRecord_s* psNodeRecord, uint64_t uWantedOffsetI
 
 exit:
     //Unlock the cache
-    CHAIN_CAHCE_ACCESS_FREE(psFSRecord);
+    CHAIN_CACHE_ACCESS_FREE(psFSRecord);
 }
 
 static int

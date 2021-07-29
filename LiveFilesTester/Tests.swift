@@ -1956,7 +1956,7 @@ class T_createFileTwice : BaseTest {
         
         (nodeResult, error) = fsTree.createNode(NodeType.File, fileName, dirNode: fsTree.rootFileNode, attrs: attrs)
         try pluginApiAssert(error, msg: "There was an error creating the file (\(error))")
-        if mountPoint.fsType!.isHFS() && mountPoint.fsType!.isAPFS() {
+        if mountPoint.fsType!.isHFS() || mountPoint.fsType!.isAPFS() {
             try testFlowAssert( nodeResult.attrs!.fa_allocsize <= Utils.roundUp(UInt32(K.FS.HFS_CLUMP_DEF_SIZE), UInt32(attrs.fa_size)), msg: "New file created allocsize size is \(nodeResult.attrs!.fa_allocsize) which expected to be \(Utils.roundUp(UInt32(K.FS.HFS_CLUMP_DEF_SIZE), UInt32(attrs.fa_size)))")
         } else {
             try testFlowAssert( nodeResult.attrs!.fa_allocsize == Utils.roundUp(mountPoint.clusterSize!, UInt32(attrs.fa_size)), msg: "New file created allocsize size is \(nodeResult.attrs!.fa_allocsize) which expected to be \(Utils.roundUp(mountPoint.clusterSize!, UInt32(attrs.fa_size)))")
@@ -1970,7 +1970,7 @@ class T_createFileTwice : BaseTest {
         (nodeResult, error) = fsTree.changeNodeAttributes(nodeResult, attrs: attrs)
         try pluginApiAssert(error, msg: "There was an error creating the file \(fileName) (\(error))")
         try testFlowAssert((nodeResult.attrs!.fa_size == attrs.fa_size), msg: "file size is \(nodeResult.attrs!.fa_size) which expected to be \(attrs.fa_size)")
-        if mountPoint.fsType!.isHFS(){
+        if mountPoint.fsType!.isHFS() || mountPoint.fsType!.isAPFS() {
             try testFlowAssert( nodeResult.attrs!.fa_allocsize <= Utils.roundUp(UInt32(K.FS.HFS_CLUMP_DEF_SIZE), UInt32(attrs.fa_size)), msg: "New file created allocsize size is \(nodeResult.attrs!.fa_allocsize) which expected to be \(Utils.roundUp(UInt32(K.FS.HFS_CLUMP_DEF_SIZE), UInt32(attrs.fa_size)))")
         } else {
         	try testFlowAssert( nodeResult.attrs!.fa_allocsize == Utils.roundUp(mountPoint.clusterSize!, UInt32(attrs.fa_size)), msg: "New file created allocsize size is \(nodeResult.attrs!.fa_allocsize) which expected to be \(Utils.roundUp(mountPoint.clusterSize!, UInt32(attrs.fa_size)))")
@@ -2201,8 +2201,7 @@ class T_readDirTest : BaseTest {
         var verifier        : UInt64    = UVFS_DIRCOOKIE_VERIFIER_INITIAL
         var actuallyRead    : size_t    = 0
         var extractedSize   : size_t    = 0
-        let minDirStreamSize: Int       = mountPoint.fsType!.isAPFS() ? 2 * get_direntry_reclen(UInt32(K.FS.FAT_MAX_FILENAME_UTF8)) :
-            get_direntry_reclen(UInt32(K.FS.FAT_MAX_FILENAME_UTF8))
+        let minDirStreamSize: Int       = get_direntry_reclen(UInt32(K.FS.FAT_MAX_FILENAME_UTF8))
         let dirStreamSize   : Int       = minDirStreamSize*10
         let dirStream = UnsafeMutableRawPointer.allocate(byteCount: Int(dirStreamSize), alignment: 1)
         dirStream.initializeMemory(as: UInt8.self, repeating: 0, count: Int(dirStreamSize))
