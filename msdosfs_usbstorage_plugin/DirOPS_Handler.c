@@ -343,7 +343,7 @@ DIROPS_IsEntryASymLink(struct dosdirentry* psEntry, FileSystemRecord_s *psFSReco
         uReadAccClusters += uReadClusters;
         if (*piError)
         {
-            MSDOS_LOG(LEVEL_ERROR, "DIROPS_IsEntryASymLink failed to get next cont clusers = %d\n", *piError);
+            MSDOS_LOG(LEVEL_ERROR, "DIROPS_IsEntryASymLink failed to get next cont clusers. Error [%d]\n", *piError);
             break;
         }
         uReadSize +=  pread(psFSRecord->iFD, pvBuffer+uReadSize, uReadClusters*CLUSTER_SIZE(psFSRecord), DIROPS_VolumeOffsetForCluster(psFSRecord,uStartCluster));
@@ -2544,12 +2544,15 @@ DIROPS_LookForDirEntryByName (NodeRecord_s* psFolderNode, const char *pcUTF8Name
         }
         else
         {
-            //Should never get here - all HT entries should be valid
-            MSDOS_LOG(LEVEL_ERROR, "psTableEntry->uEntryOffsetInDir %llu, status: %d.\n",
-                      psTableEntry->uEntryOffsetInDir, eStatus);
-            assert(0);
+            //We have an issue with HT, found un-expected type in the hastable, log a fault and skip it
+            MSDOS_LOG(LEVEL_FAULT,
+                      "%s: Found unexpected type during hashed lookup, eStatus %d, skipping",
+                      __FUNCTION__, eStatus);
+            //TODO: We should investiage if it's really a fault to have something else besides directories and files in
+            //TODO: the hash table. In case we found it we should try to repair the hashtable and limp along. Also we
+            //TODO: need to make sure we do not insert un-expect stuff into hashtable as well.
         }
-        
+
         psTableEntry = psTableEntry->psNextEntry;
     } while ((psTableEntry != NULL) && !bFoundMatch);
 
@@ -3070,6 +3073,7 @@ DIROPS_DeInitDirClusterDataCache(FileSystemRecord_s *psFSRecord)
             free(psFSRecord->sDirClusterCache.sGlobalFAT12_16RootClusterrCache->puClusterData);
             free(psFSRecord->sDirClusterCache.sGlobalFAT12_16RootClusterrCache);
         }
+        psFSRecord->sDirClusterCache.bIsAllocated = false;
     }
 }
 
@@ -3083,6 +3087,7 @@ DIROPS_InitDirClusterDataCache(FileSystemRecord_s *psFSRecord)
     pthread_mutexattr_settype(&sAttr, PTHREAD_MUTEX_ERRORCHECK);
     pthread_mutex_init(&psFSRecord->sDirClusterCache.sDirClusterDataCacheMutex, &sAttr);
     pthread_cond_init(&psFSRecord->sDirClusterCache.sDirClusterCacheCond, NULL);
+    pthread_mutexattr_destroy(&sAttr);
     uint32_t uClusterSize = CLUSTER_SIZE(psFSRecord);
 
     for (int uIdx = 0; uIdx < DIR_CLUSTER_DATA_TABLE_MAX; uIdx++) {
@@ -3092,7 +3097,7 @@ DIROPS_InitDirClusterDataCache(FileSystemRecord_s *psFSRecord)
         {
             MSDOS_LOG(LEVEL_ERROR, "DIROPS_InitDirClusterDataCache failed to allocate memory.\n");
             iErr = ENOMEM;
-            break;
+            goto fail;
         }
         memset(psClusterData->puClusterData, 0, uClusterSize);
 
@@ -3140,15 +3145,27 @@ DIROPS_InitDirClusterDataCache(FileSystemRecord_s *psFSRecord)
     }
 
     psFSRecord->sDirClusterCache.uNumOfUnusedEntries = DIR_CLUSTER_DATA_TABLE_MAX;
+    psFSRecord->sDirClusterCache.bIsAllocated = true;
     goto exit;
 
 fail:
     //Need to free what we already managed to allocate
+    pthread_mutex_destroy(&psFSRecord->sDirClusterCache.sDirClusterDataCacheMutex);
+    pthread_cond_destroy(&psFSRecord->sDirClusterCache.sDirClusterCacheCond);
     for (int uIdx = 0; uIdx < DIR_CLUSTER_DATA_TABLE_MAX; uIdx++) {
         if (psFSRecord->sDirClusterCache.sDirClusterCacheData[uIdx].puClusterData) {
             free(psFSRecord->sDirClusterCache.sDirClusterCacheData[uIdx].puClusterData);
             psFSRecord->sDirClusterCache.sDirClusterCacheData[uIdx].puClusterData = NULL;
+            MultiReadSingleWrite_DeInit(&psFSRecord->sDirClusterCache.sDirClusterCacheData[uIdx].sCDLck);
         }
+    }
+
+    if (psFSRecord->sDirClusterCache.sGlobalFAT12_16RootClusterrCache) {
+        if (psFSRecord->sDirClusterCache.sGlobalFAT12_16RootClusterrCache->puClusterData) {
+            free(psFSRecord->sDirClusterCache.sGlobalFAT12_16RootClusterrCache->puClusterData);
+            MultiReadSingleWrite_DeInit(&psFSRecord->sDirClusterCache.sGlobalFAT12_16RootClusterrCache->sCDLck);
+        }
+        free(psFSRecord->sDirClusterCache.sGlobalFAT12_16RootClusterrCache);
     }
 exit:
     return iErr;
