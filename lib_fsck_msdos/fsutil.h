@@ -49,14 +49,22 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-void perr __P((const char *));
+#include "lib_fsck_msdos.h"
+
+void perrno __P((const char *));
 void errexit __P((const char *, ...))
     __attribute__((__noreturn__,__format__(__printf__,1,2)));  
 void pfatal __P((const char *, ...))
-    __attribute__((__format__(__printf__,1,2)));  
+    __attribute__((__format__(__printf__,1,2)));
 void pwarn __P((const char *, ...))
-    __attribute__((__format__(__printf__,1,2)));  
-void setcdevname __P((const char *));
+    __attribute__((__format__(__printf__,1,2)));
+void perr __P((const char *, ...))
+    __attribute__((__format__(__printf__,1,2)));
+
+void vpfatal(fsck_client_ctx_t, const char *fmt, va_list ap);
+void vpwarn(fsck_client_ctx_t, const char *fmt, va_list ap);
+void vperr(fsck_client_ctx_t, const char *fmt, va_list ap);
+void vprint(fsck_client_ctx_t client, int level, const char *fmt, va_list ap);
 
 #define CHECK_PREEN	1
 #define	CHECK_VERBOSE	2

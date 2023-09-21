@@ -70,7 +70,7 @@
 #include <sys/errno.h>
 
 #include "ext.h"
-#include "fsutil.h"
+#include "lib_fsck_msdos.h"
 
 #define	SLOT_EMPTY	0x00		/* slot has never been used */
 #define	SLOT_E5		0x05		/* the real value is 0xe5 */
@@ -130,7 +130,7 @@ static int readDosDirSection __P((int, struct bootblock *, struct dosDirEntry *,
 static struct dosDirEntry *freede;
 
 static struct dosDirEntry *
-newDosDirEntry()
+newDosDirEntry(void)
 {
 	struct dosDirEntry *de;
 
@@ -143,8 +143,7 @@ newDosDirEntry()
 }
 
 static void
-freeDosDirEntry(de)
-	struct dosDirEntry *de;
+freeDosDirEntry(struct dosDirEntry *de)
 {
 	de->next = freede;
 	freede = de;
@@ -156,7 +155,7 @@ freeDosDirEntry(de)
 static struct dirTodoNode *freedt;
 
 static struct dirTodoNode *
-newDirTodo()
+newDirTodo(void)
 {
 	struct dirTodoNode *dt;
 
@@ -169,8 +168,7 @@ newDirTodo()
 }
 
 static void
-freeDirTodo(dt)
-	struct dirTodoNode *dt;
+freeDirTodo(struct dirTodoNode *dt)
 {
 	dt->next = freedt;
 	freedt = dt;
@@ -185,8 +183,7 @@ struct dirTodoNode *pendingDirectories = NULL;
  * Return the full pathname for a directory entry.
  */
 static char *
-fullpath(dir)
-	struct dosDirEntry *dir;
+fullpath(struct dosDirEntry *dir)
 {
 	static char namebuf[MAXPATHLEN + 1];
 	char *cp, *np;
@@ -225,8 +222,7 @@ fullpath(dir)
  * Calculate a checksum over an 8.3 alias name
  */
 static u_char
-calcShortSum(p)
-	u_char *p;
+calcShortSum(u_char *p)
 {
 	u_char sum = 0;
 	int i;
@@ -294,15 +290,15 @@ markDosDirChain(struct bootblock *boot, struct dosDirEntry *dir)
 	if (cluster < CLUST_EOFS)
 	{
 		if (cluster == CLUST_FREE || cluster >= CLUST_RSRVD)
-			pwarn("%s: Cluster chain starting at %u ends with cluster marked %s\n",
+			fsck_print(fsck_ctx, LOG_INFO, "Warning: %s: Cluster chain starting at %u ends with cluster marked %s\n",
 				fullpath(dir), dir->head, rsrvdcltype(cluster));
 		else if (cluster < CLUST_FIRST || cluster >= boot->NumClusters)
-			pwarn("%s: Cluster chain starting at %u continues with cluster out of range (%u)\n",
+			fsck_print(fsck_ctx, LOG_INFO, "Warning: %s: Cluster chain starting at %u continues with cluster out of range (%u)\n",
 				fullpath(dir), dir->head, cluster);
 		else
-			pwarn("%s: Cluster chain starting at %u is cross-linked at cluster %u\n",
+			fsck_print(fsck_ctx, LOG_INFO, "Warning: %s: Cluster chain starting at %u is cross-linked at cluster %u\n",
 				fullpath(dir), dir->head, cluster);
-		if (ask(1, "Truncate"))
+		if (fsck_ask(fsck_ctx, 1, "Truncate"))
 		{
 			err = fat_set(prev, CLUST_EOF);
 			if (err)
@@ -347,13 +343,13 @@ resetDosDirSection(struct bootblock *boot)
 	if (!(buffer = malloc(b1 > b2 ? b1 : b2))
 	    || !(delbuf = malloc(b2))
 	    || !(rootDir = newDosDirEntry())) {
-		perr("No space for directory");
+		fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "No space for directory", strerror(errno));
 		return FSFATAL;
 	}
 	memset(rootDir, 0, sizeof *rootDir);
 	if (boot->flags & FAT32) {
 		if (boot->RootCl < CLUST_FIRST || boot->RootCl >= boot->NumClusters) {
-			pfatal("Root directory starts with cluster out of range(%u)\n",
+			fsck_print(fsck_ctx, LOG_CRIT, "Root directory starts with cluster out of range(%u)\n",
 			       boot->RootCl);
 			return FSFATAL;
 		}
@@ -365,11 +361,11 @@ resetDosDirSection(struct bootblock *boot)
 		if (cl < CLUST_FIRST
 		    || (cl >= CLUST_RSRVD && cl< CLUST_EOFS)) {
 			if (cl == CLUST_FREE)
-				pwarn("Root directory starts with free cluster\n");
+				fsck_print(fsck_ctx, LOG_INFO, "Warning: Root directory starts with free cluster\n");
 			else if (cl >= CLUST_RSRVD)
-				pwarn("Root directory starts with cluster marked %s\n",
+				fsck_print(fsck_ctx, LOG_INFO, "Warning: Root directory starts with cluster marked %s\n",
 				      rsrvdcltype(cl));
-			if (ask(1, "Fix")) {
+			if (fsck_ask(fsck_ctx, 1, "Fix")) {
 				/*
 				 * This used to assign CLUST_FREE.  How was that a good idea???
 				 */
@@ -398,7 +394,7 @@ resetDosDirSection(struct bootblock *boot)
  * Cleanup after a directory scan
  */
 void
-finishDosDirSection()
+finishDosDirSection(void)
 {
 	struct dirTodoNode *p, *np;
 	struct dosDirEntry *d, *nd;
@@ -456,7 +452,7 @@ delete(int fd, struct bootblock *boot, cl_t startcl, size_t startoff, cl_t endcl
 		off *= boot->BytesPerSec;
 		if (lseek(fd, off, SEEK_SET) != off
 		    || read(fd, delbuf, clsz) != clsz) {
-			perr("Unable to read directory");
+			fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to read directory", strerror(errno));
 			return FSFATAL;
 		}
 		while (s < e) {
@@ -465,7 +461,7 @@ delete(int fd, struct bootblock *boot, cl_t startcl, size_t startoff, cl_t endcl
 		}
 		if (lseek(fd, off, SEEK_SET) != off
 		    || write(fd, delbuf, clsz) != clsz) {
-			perr("Unable to write directory");
+			fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to write directory", strerror(errno));
 			return FSFATAL;
 		}
 		if (startcl == endcl)
@@ -479,32 +475,23 @@ delete(int fd, struct bootblock *boot, cl_t startcl, size_t startoff, cl_t endcl
 }
 
 static int
-msdosfs_removede(f, boot, start, end, startcl, endcl, curcl, path, type, force)
-	int f;
-	struct bootblock *boot;
-	u_char *start;
-	u_char *end;
-	cl_t startcl;
-	cl_t endcl;
-	cl_t curcl;
-	char *path;
-	int type;
+msdosfs_removede(int f, struct bootblock *boot, u_char *start, u_char *end, cl_t startcl, cl_t endcl, cl_t curcl, char *path, int type, int force)
 {
 	switch (type) {
 	case 0:
-		pwarn("Invalid long filename entry for %s\n", path);
+		fsck_print(fsck_ctx, LOG_INFO, "Warning: Invalid long filename entry for %s\n", path);
 		break;
 	case 1:
-		pwarn("Invalid long filename entry at end of directory %s\n", path);
+		fsck_print(fsck_ctx, LOG_INFO, "Warning: Invalid long filename entry at end of directory %s\n", path);
 		break;
 	case 2:
-		pwarn("Invalid long filename entry for volume label\n");
+		fsck_print(fsck_ctx, LOG_INFO, "Warning: Invalid long filename entry for volume label\n");
 		break;
     case 3:
-        pwarn("Remove unlinked file entry\n");
+        fsck_print(fsck_ctx, LOG_INFO, "Warning: Remove unlinked file entry\n");
         break;
 	}
-	if (force || ask(0, "Remove")) {
+	if (force || fsck_ask(fsck_ctx, 0, "Remove")) {
 		if (startcl != curcl) {
 			if (delete(f, boot,
 				   startcl, start - buffer,
@@ -529,18 +516,15 @@ msdosfs_removede(f, boot, start, end, startcl, endcl, curcl, path, type, force)
  * has been set up.
  */
 static int
-checksize(boot, p, dir)
-	struct bootblock *boot;
-	u_char *p;
-	struct dosDirEntry *dir;
+checksize(struct bootblock *boot, u_char *p, struct dosDirEntry *dir)
 {
 	/*
 	 * Check size on ordinary files
 	 */
 	if (dir->physicalSize < dir->size) {
-		pwarn("size of %s is %u, should at most be %llu\n",
+		fsck_print(fsck_ctx, LOG_INFO, "Warning: size of %s is %u, should at most be %llu\n",
 		      fullpath(dir), dir->size, dir->physicalSize);
-		if (ask(1, "Truncate")) {
+		if (fsck_ask(fsck_ctx, 1, "Truncate")) {
 			dir->size = (uint32_t)dir->physicalSize;
 			p[28] = (u_char)dir->physicalSize;
 			p[29] = (u_char)(dir->physicalSize >> 8);
@@ -550,9 +534,9 @@ checksize(boot, p, dir)
 		} else
 			return FSERROR;
 	} else if (dir->physicalSize - dir->size >= boot->ClusterSize) {
-		pwarn("%s has too many clusters allocated (logical=%u, physical=%llu)\n",
+		fsck_print(fsck_ctx, LOG_INFO, "Warning: %s has too many clusters allocated (logical=%u, physical=%llu)\n",
 		      fullpath(dir), dir->size, dir->physicalSize);
-		if (ask(1, "Drop superfluous clusters")) {
+		if (fsck_ask(fsck_ctx, 1, "Drop superfluous clusters")) {
 			int mod = 0;
 			cl_t cl, next;
 			u_int64_t sz = 0;
@@ -640,14 +624,14 @@ static errno_t isSubdirectory(int fd, struct bootblock *boot, struct dosDirEntry
     
     buf = malloc(boot->BytesPerSec);
     if (buf == NULL) {
-        perr("No memory for subdirectory buffer");
+        fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "No memory for subdirectory buffer", strerror(errno));
         return ENOMEM;
     }
 
     offset = (((off_t)dir->head - CLUST_FIRST) * boot->SecPerClust + boot->ClusterOffset) * boot->BytesPerSec;
     amount = pread(fd, buf, boot->BytesPerSec, offset);
     if (amount != boot->BytesPerSec) {
-        pfatal("Unable to read cluster %u", dir->head);
+        fsck_print(fsck_ctx, LOG_CRIT, "Unable to read cluster %u", dir->head);
         err = EIO;
         goto fail;
     }
@@ -676,10 +660,7 @@ fail:
  *   - remove unlinked files
  */
 static int
-readDosDirSection(f, boot, dir, rdonly)
-	int f;
-	struct bootblock *boot;
-	struct dosDirEntry *dir;
+readDosDirSection(int f, struct bootblock *boot, struct dosDirEntry *dir, int rdonly)
 {
 	struct dosDirEntry dirent, *d;
 	u_char *p, *vallfn, *invlfn, *empty;
@@ -698,7 +679,7 @@ readDosDirSection(f, boot, dir, rdonly)
 		/*
 		 * Already handled somewhere else.
 		 */
-		fprintf(stderr, "readDosDirSection: Start cluster (%u) out of range; ignoring\n", cl);
+		fsck_print(fsck_ctx, LOG_ERR, "readDosDirSection: Start cluster (%u) out of range; ignoring\n", cl);
 		return FSOK;
 	}
 	
@@ -722,7 +703,7 @@ readDosDirSection(f, boot, dir, rdonly)
 		off *= boot->BytesPerSec;
 		if (lseek(f, off, SEEK_SET) != off
 		    || read(f, buffer, last) != last) {
-			perr("Unable to read directory");
+			fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to read directory", strerror(errno));
 			return FSFATAL;
 		}
 		last /= 32;
@@ -748,11 +729,11 @@ readDosDirSection(f, boot, dir, rdonly)
 
 			if (dir->fsckflags & DIREMPTY) {
 				if (!(dir->fsckflags & DIREMPWARN)) {
-					pwarn("%s has entries after end of directory\n",
+					fsck_print(fsck_ctx, LOG_INFO, "Warning: %s has entries after end of directory\n",
 					      fullpath(dir));
-					if (ask(1, "Truncate"))
+					if (fsck_ask(fsck_ctx, 1, "Truncate"))
 						dir->fsckflags |= DIREMPWARN;
-					else if (ask(0, "Extend")) {
+					else if (fsck_ask(fsck_ctx, 0, "Extend")) {
 						u_char *q;
 
 						dir->fsckflags &= ~DIREMPTY;
@@ -806,7 +787,7 @@ readDosDirSection(f, boot, dir, rdonly)
 				lidx = *p & LRNOMASK;
                 
                 if (lidx < 1) {
-                    pwarn("long file name is not available\n");
+                    fsck_print(fsck_ctx, LOG_INFO, "Warning: long file name is not available\n");
                     if (!invlfn) {
                         invlfn = vallfn;
                         invcl = valcl;
@@ -845,7 +826,7 @@ readDosDirSection(f, boot, dir, rdonly)
                         }
                     
                     if (t >= longName + sizeof(longName)) {
-                        pwarn("long filename too long\n");
+                        fsck_print(fsck_ctx, LOG_INFO, "Warning: long filename too long\n");
                         if (!invlfn) {
                             invlfn = vallfn;
                             invcl = valcl;
@@ -853,7 +834,7 @@ readDosDirSection(f, boot, dir, rdonly)
                         vallfn = NULL;
                     }
                     if (p[26] | (p[27] << 8)) {
-                        pwarn("long filename record cluster start != 0\n");
+                        fsck_print(fsck_ctx, LOG_INFO, "Warning: long filename record cluster start != 0\n");
                         if (!invlfn) {
                             invlfn = vallfn;
                             invcl = cl;
@@ -986,7 +967,7 @@ readDosDirSection(f, boot, dir, rdonly)
 				{
 					if (dirent.flags & ATTR_DIRECTORY || dirent.size != 0)
 					{
-						pwarn("%s has no clusters\n", fullpath(&dirent));
+						fsck_print(fsck_ctx, LOG_INFO, "Warning: %s has no clusters\n", fullpath(&dirent));
 						goto remove_or_truncate;
 					}
 				}
@@ -996,14 +977,14 @@ readDosDirSection(f, boot, dir, rdonly)
 					
 					if (dirent.head < CLUST_FIRST || dirent.head >= boot->NumClusters)
 					{
-						pwarn("%s starts with cluster out of range (%u)\n",
+						fsck_print(fsck_ctx, LOG_INFO, "Warning: %s starts with cluster out of range (%u)\n",
 								fullpath(&dirent), dirent.head);
 						goto remove_or_truncate;
 					}
 					
 					if (isUsed(dirent.head))
 					{
-						pwarn("%s starts with cross-linked cluster (%u)\n",
+						fsck_print(fsck_ctx, LOG_INFO, "Warning: %s starts with cross-linked cluster (%u)\n",
 								fullpath(&dirent), dirent.head);
 						goto remove_or_truncate;
 					}
@@ -1014,25 +995,25 @@ readDosDirSection(f, boot, dir, rdonly)
 					
 					if (next == CLUST_FREE)
 					{
-						pwarn("%s starts with free cluster\n", fullpath(&dirent));
+						fsck_print(fsck_ctx, LOG_INFO, "Warning: %s starts with free cluster\n", fullpath(&dirent));
 						goto remove_or_truncate;
 					}
 					
 					if (next >= CLUST_RSRVD && next < CLUST_EOFS)
 					{
-						pwarn("%s starts with cluster marked %s\n",
+						fsck_print(fsck_ctx, LOG_INFO, "Warning: %s starts with cluster marked %s\n",
 							  fullpath(&dirent),
 							  rsrvdcltype(next));
 	remove_or_truncate:
 						if (dirent.flags & ATTR_DIRECTORY) {
-							if (ask(0, "Remove")) {
+							if (fsck_ask(fsck_ctx, 0, "Remove")) {
 								*p = SLOT_DELETED;
 								mod |= THISMOD|FSDIRMOD;
 							} else
 								mod |= FSERROR;
 							continue;
 						} else {
-							if (ask(1, "Truncate")) {
+							if (fsck_ask(fsck_ctx, 1, "Truncate")) {
 								p[28] = p[29] = p[30] = p[31] = 0;
 								p[26] = p[27] = 0;
 								if (boot->ClustMask == CLUST32_MASK)
@@ -1060,9 +1041,9 @@ MarkedChain:
 				 * gather more info for directories
 				 */
 				if (dirent.size) {
-					pwarn("Directory %s has size != 0\n",
+					fsck_print(fsck_ctx, LOG_INFO, "Warning: Directory %s has size != 0\n",
 					      fullpath(&dirent));
-					if (ask(1, "Correct")) {
+					if (fsck_ask(fsck_ctx, 1, "Correct")) {
 						p[28] = p[29] = p[30] = p[31] = 0;
 						dirent.size = 0;
 						mod |= THISMOD|FSDIRMOD;
@@ -1074,9 +1055,9 @@ MarkedChain:
 				 */
 				if (strcmp(dirent.name, ".") == 0) {
 					if (dirent.head != dir->head) {
-						pwarn("`.' entry in %s has incorrect start cluster\n",
+						fsck_print(fsck_ctx, LOG_INFO, "Warning: `.' entry in %s has incorrect start cluster\n",
 						      fullpath(dir));
-						if (ask(1, "Correct")) {
+						if (fsck_ask(fsck_ctx, 1, "Correct")) {
 							dirent.head = dir->head;
 							p[26] = (u_char)dirent.head;
 							p[27] = (u_char)(dirent.head >> 8);
@@ -1094,9 +1075,9 @@ MarkedChain:
 					if (dir->parent) {		/* XXX */
 						if (!dir->parent->parent) {
 							if (dirent.head) {
-								pwarn("`..' entry in %s has non-zero start cluster\n",
+								fsck_print(fsck_ctx, LOG_INFO, "Warning: `..' entry in %s has non-zero start cluster\n",
 								      fullpath(dir));
-								if (ask(1, "Correct")) {
+								if (fsck_ask(fsck_ctx, 1, "Correct")) {
 									dirent.head = 0;
 									p[26] = p[27] = 0;
 									if (boot->ClustMask == CLUST32_MASK)
@@ -1106,9 +1087,9 @@ MarkedChain:
 									mod |= FSERROR;
 							}
 						} else if (dirent.head != dir->parent->head) {
-							pwarn("`..' entry in %s has incorrect start cluster\n",
+							fsck_print(fsck_ctx, LOG_INFO, "Warning: `..' entry in %s has incorrect start cluster\n",
 							      fullpath(dir));
-							if (ask(1, "Correct")) {
+							if (fsck_ask(fsck_ctx, 1, "Correct")) {
 								dirent.head = dir->parent->head;
 								p[26] = (u_char)dirent.head;
 								p[27] = (u_char)(dirent.head >> 8);
@@ -1132,8 +1113,8 @@ MarkedChain:
                 errno_t err = isSubdirectory(f, boot, &dirent);
                 if (err) {
                     if (err == ENOTDIR) {
-                        pwarn("Item %s does not appear to be a subdirectory\n", fullpath(&dirent));
-                        if (ask(0, "Correct")) {
+                        fsck_print(fsck_ctx, LOG_INFO, "Warning: Item %s does not appear to be a subdirectory\n", fullpath(&dirent));
+                        if (fsck_ask(fsck_ctx, 0, "Correct")) {
                             p[11] &= ~ATTR_DIRECTORY;
                             dirent.flags &= ~ATTR_DIRECTORY;
                             mod |= THISMOD|FSDIRMOD;
@@ -1148,7 +1129,7 @@ MarkedChain:
                 
 				/* create directory tree node */
 				if (!(d = newDosDirEntry())) {
-					perr("No space for directory");
+					fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "No space for directory", strerror(errno));
 					return FSFATAL;
 				}
 				memcpy(d, &dirent, sizeof(struct dosDirEntry));
@@ -1158,7 +1139,7 @@ MarkedChain:
 				/* Enter this directory into the todo list */
                 struct dirTodoNode *n;
 				if (!(n = newDirTodo())) {
-					perr("No space for todo list");
+					fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "No space for todo list", strerror(errno));
 					return FSFATAL;
 				}
 				n->next = pendingDirectories;
@@ -1175,7 +1156,7 @@ MarkedChain:
 		if (mod & THISMOD) {
 			if (lseek(f, off, SEEK_SET) != off
 			    || write(f, buffer, last*32) != last*32) {
-				perr("Unable to write directory");
+				fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to write directory", strerror(errno));
 				return FSFATAL;
 			}
 			mod &= ~THISMOD;
@@ -1200,7 +1181,7 @@ MarkedChain:
 				fullpath(dir), 1, 0);
 		if (lseek(f, off, SEEK_SET) != off
 			|| write(f, buffer, last*32) != last*32) {
-			perr("Unable to write directory");
+			fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to write directory", strerror(errno));
 			return FSFATAL;
 		}
 	}

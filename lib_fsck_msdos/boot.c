@@ -64,16 +64,14 @@
 #include <os/overflow.h>
 
 #include "ext.h"
-#include "fsutil.h"
+#include "lib_fsck_msdos.h"
 
 int
-readboot(dosfs, boot)
-	int dosfs;
-	struct bootblock *boot;
+readboot(int dosfs, struct bootblock *boot)
 {
 	u_char block[MAX_SECTOR_SIZE];
 	u_char fsinfo[MAX_SECTOR_SIZE];
-    u_int32_t result = 0;
+	u_int32_t result = 0;
 	int ret = FSOK;
 	
 	/*
@@ -82,7 +80,7 @@ readboot(dosfs, boot)
 	 * the maximum sector size (which may end up reading more than one sector).
 	 */
 	if (read(dosfs, block, MAX_SECTOR_SIZE) != MAX_SECTOR_SIZE) {
-		perr("could not read boot block");
+		fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "could not read boot block", strerror(errno));
 		return FSFATAL;
 	}
 
@@ -100,7 +98,7 @@ readboot(dosfs, boot)
 	*/
 	if (block[0] != 0xE9 && block[0] != 0xEB)
 	{
-		pfatal("Invalid BS_jmpBoot in boot block: %02x%02x%02x\n", block[0], block[1], block[2]);
+		fsck_print(fsck_ctx, LOG_CRIT, "Invalid BS_jmpBoot in boot block: %02x%02x%02x\n", block[0], block[1], block[2]);
 		return FSFATAL;
 	}
 
@@ -129,9 +127,9 @@ readboot(dosfs, boot)
 	 * 512..MAX_SECTOR_SIZE.
 	 */
 	if (boot->BytesPerSec < DOSBOOTBLOCKSIZE || boot->BytesPerSec > MAX_SECTOR_SIZE ||
-	    (boot->BytesPerSec & (boot->BytesPerSec - 1)) != 0)
+		(boot->BytesPerSec & (boot->BytesPerSec - 1)) != 0)
 	{
-		pfatal("Invalid sector size: %u\n", boot->BytesPerSec);
+		fsck_print(fsck_ctx, LOG_CRIT, "Invalid sector size: %u\n", boot->BytesPerSec);
 		return FSFATAL;
 	}
 	
@@ -144,9 +142,9 @@ readboot(dosfs, boot)
 	 * but we don't actually enforce that here.
 	 */
 	if (boot->SecPerClust == 0 ||
-	    (boot->SecPerClust & (boot->SecPerClust - 1)) != 0)
+		(boot->SecPerClust & (boot->SecPerClust - 1)) != 0)
 	{
-		pfatal("Invalid sectors per cluster: %u\n", boot->SecPerClust);
+		fsck_print(fsck_ctx, LOG_CRIT, "Invalid sectors per cluster: %u\n", boot->SecPerClust);
 		return FSFATAL;
 	}
 
@@ -162,7 +160,7 @@ readboot(dosfs, boot)
 		/* check version number: */
 		if (block[42] || block[43]) {
 			/* Correct?				XXX */
-			pfatal("Unknown filesystem version: %x.%x\n",
+			fsck_print(fsck_ctx, LOG_CRIT, "Unknown filesystem version: %x.%x\n",
 			       block[43], block[42]);
 			return FSFATAL;
 		}
@@ -172,10 +170,10 @@ readboot(dosfs, boot)
 		boot->Backup = block[50] + (block[51] << 8);
 
 		if (lseek(dosfs, boot->FSInfo * boot->BytesPerSec, SEEK_SET)
-		    != boot->FSInfo * boot->BytesPerSec
-		    || read(dosfs, fsinfo, boot->BytesPerSec)
-		    != boot->BytesPerSec) {
-			perr("could not read fsinfo block");
+			!= boot->FSInfo * boot->BytesPerSec
+			|| read(dosfs, fsinfo, boot->BytesPerSec)
+			!= boot->BytesPerSec) {
+			fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "could not read fsinfo block", strerror(errno));
 			return FSFATAL;
 		}
 		if (memcmp(fsinfo, "RRaA", 4)
@@ -184,8 +182,8 @@ readboot(dosfs, boot)
 		    || fsinfo[0x1fd]
 		    || fsinfo[0x1fe] != 0x55
 		    || fsinfo[0x1ff] != 0xaa) {
-			pwarn("Invalid signature in fsinfo block\n");
-			if (ask(0, "fix")) {
+			fsck_print(fsck_ctx, LOG_INFO, "Warning: Invalid signature in fsinfo block\n");
+			if (fsck_ask(fsck_ctx, 0, "fix")) {
 				memcpy(fsinfo, "RRaA", 4);
 				memcpy(fsinfo + 0x1e4, "rrAa", 4);
 				fsinfo[0x1fc] = fsinfo[0x1fd] = 0;
@@ -198,7 +196,7 @@ readboot(dosfs, boot)
 				    != boot->FSInfo * boot->BytesPerSec
 				    || write(dosfs, fsinfo, boot->BytesPerSec)
 				    != boot->BytesPerSec) {
-					perr("Unable to write FSInfo");
+					fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to write FSInfo", strerror(errno));
 					return FSFATAL;
 				}
 				ret = FSBOOTMOD;
@@ -219,36 +217,36 @@ readboot(dosfs, boot)
 
 	/* sanity check the FATs and FATsecs */
 	if (os_mul_overflow(boot->FATs, boot->FATsecs, &result)) {
-		pfatal("Invalid boot->FATs or boot->FATsecs\n");
+		fsck_print(fsck_ctx, LOG_CRIT, "Invalid boot->FATs or boot->FATsecs\n");
 		return FSFATAL;
 	}
 
 	boot->ClusterOffset = (boot->RootDirEnts * 32 + boot->BytesPerSec - 1)
-	    / boot->BytesPerSec
-	    + boot->ResSectors
-	    + result;
+			/ boot->BytesPerSec
+			+ boot->ResSectors
+			+ result;
 
 	if (boot->Sectors) {
 		boot->HugeSectors = 0;
 		boot->NumSectors = boot->Sectors;
-    } else if (boot->HugeSectors) {
+	} else if (boot->HugeSectors) {
 		boot->NumSectors = boot->HugeSectors;
-    } else {
-        boot->NumSectors = 0;
-        u_int64_t SuperHugeSectors = (block[66] != 0x29)? 0 : (uint64_t) block[82] + ((uint64_t) block[83] << 8) + ((uint64_t) block[84] << 16) + ((uint64_t) block[85] << 24) + ((uint64_t) block[86]<<32) + ((uint64_t) block[87] << 40) + ((uint64_t) block[88] << 48) + ((uint64_t) block[89] << 54);
-        if (SuperHugeSectors != 0) {
-            pwarn("Encountered special FAT where total sector location is 64bit. Not Supported \n");
-        } else {
-            char cOEMName[9] = {0};
-            strlcpy(&cOEMName[0], (char *) &block[3] , 8);
-            cOEMName[8] = '\0';
-            pwarn("OEMName: %s\n", cOEMName);
-        }
-    }
+	} else {
+		boot->NumSectors = 0;
+		u_int64_t SuperHugeSectors = (block[66] != 0x29)? 0 : (uint64_t) block[82] + ((uint64_t) block[83] << 8) + ((uint64_t) block[84] << 16) + ((uint64_t) block[85] << 24) + ((uint64_t) block[86]<<32) + ((uint64_t) block[87] << 40) + ((uint64_t) block[88] << 48) + ((uint64_t) block[89] << 54);
+		if (SuperHugeSectors != 0) {
+			fsck_print(fsck_ctx, LOG_INFO, "Warning: Encountered special FAT where total sector location is 64bit. Not Supported \n");
+		} else {
+			char cOEMName[9] = {0};
+			strlcpy(&cOEMName[0], (char *) &block[3] , 8);
+			cOEMName[8] = '\0';
+			fsck_print(fsck_ctx, LOG_INFO, "Warning: OEMName: %s\n", cOEMName);
+		}
+	}
 
-    /* Ensure NumSectors isn't zero and >= ClusterOffset */
-    if ((boot->NumSectors == 0) || (boot->NumSectors < boot->ClusterOffset)) {
-        pfatal("Filesystem has invalid NumSectors %u\n", boot->NumSectors);
+	/* Ensure NumSectors isn't zero and >= ClusterOffset */
+	if ((boot->NumSectors == 0) || (boot->NumSectors < boot->ClusterOffset)) {
+		fsck_print(fsck_ctx, LOG_CRIT, "Filesystem has invalid NumSectors %u\n", boot->NumSectors);
 		return FSFATAL;
 	}
 
@@ -260,7 +258,7 @@ readboot(dosfs, boot)
 	 */
 	boot->NumClusters = CLUST_FIRST + (boot->NumSectors - boot->ClusterOffset) / boot->SecPerClust;
 
-    /* Since NumClusters is off by two, use constants that are off by two also. */
+	/* Since NumClusters is off by two, use constants that are off by two also. */
 	if (boot->flags&FAT32)
 		boot->ClustMask = CLUST32_MASK;
 	else if (boot->NumClusters < (4085+2))
@@ -268,8 +266,7 @@ readboot(dosfs, boot)
 	else if (boot->NumClusters < (65526+2))		/* Windows allows 65525 clusters, so we should, too */
 		boot->ClustMask = CLUST16_MASK;
 	else {
-		pfatal("Filesystem too big (%u clusters) for non-FAT32 partition\n",
-		       boot->NumClusters-2);
+		fsck_print(fsck_ctx, LOG_CRIT, "Filesystem too big (%u clusters) for non-FAT32 partition\n", boot->NumClusters-2);
 		return FSFATAL;
 	}
 
@@ -277,7 +274,7 @@ readboot(dosfs, boot)
 
 	/* sanity check FATsecs and BytesPerSec */
 	if (os_mul_overflow(boot->FATsecs, boot->BytesPerSec, &result)) {
-		pfatal("Invalid boot->FATsecs or boot->BytesPerSec\n");
+		fsck_print(fsck_ctx, LOG_CRIT, "Invalid boot->FATsecs or boot->BytesPerSec\n");
 		return FSFATAL;
 	}
 
@@ -289,15 +286,15 @@ readboot(dosfs, boot)
 		boot->NumFatEntries = result / 2;
 		break;
 	default:
-        {
-            u_int32_t mul2 = 0;
-            if (os_mul_overflow(result, 2, &mul2)) {
-                pfatal("Invalid boot->FATsecs or boot->BytesPerSec for FAT12\n");
-                return FSFATAL;
-            }
-            boot->NumFatEntries = mul2 / 3;
-            break;
-        }
+		{
+			u_int32_t mul2 = 0;
+			if (os_mul_overflow(result, 2, &mul2)) {
+				fsck_print(fsck_ctx, LOG_CRIT, "Invalid boot->FATsecs or boot->BytesPerSec for FAT12\n");
+				return FSFATAL;
+			}
+			boot->NumFatEntries = mul2 / 3;
+			break;
+		}
 	}
 
 	/*
@@ -306,10 +303,10 @@ readboot(dosfs, boot)
 	 * newfs_msdos, can create volumes whose total sector count is too large.
 	 */
 	if (boot->NumFatEntries < boot->NumClusters) {
-		pwarn("FAT size too small, %u entries won't fit into %u sectors\n",
+		fsck_print(fsck_ctx, LOG_INFO, "Warning: FAT size too small, %u entries won't fit into %u sectors\n",
 		       boot->NumClusters, boot->FATsecs);
 		boot->NumClusters = boot->NumFatEntries;
-		if (ask(0, "Fix total sectors")) {
+		if (fsck_ask(fsck_ctx, 0, "Fix total sectors")) {
 			/* Need to recompute sectors based on clusters */
 			boot->NumSectors = ((boot->NumClusters - CLUST_FIRST) * boot->SecPerClust) + boot->ClusterOffset;
 			if (boot->Sectors) {
@@ -322,16 +319,16 @@ readboot(dosfs, boot)
 				block[33] = (boot->NumSectors >> 8) & 0xFF;
 				block[34] = (boot->NumSectors >> 16) & 0xFF;
 				block[35] = (boot->NumSectors >> 24) & 0xFF;
-            }
+			}
 			if (lseek(dosfs, 0, SEEK_SET) != 0 ||
 				write(dosfs, block, boot->BytesPerSec) != boot->BytesPerSec)
 			{
-				perr("could not write boot sector");
+				fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "could not write boot sector", strerror(errno));
 				return FSFATAL;
 			}
 			ret |= FSBOOTMOD;	/* This flag is currently ignored by checkfilesys() */
 		} else {
-			pwarn("Continuing, assuming %u clusters\n", boot->NumFatEntries-2);
+			fsck_print(fsck_ctx, LOG_INFO, "Warning: Continuing, assuming %u clusters\n", boot->NumFatEntries-2);
 			/*
 			 * We don't return an error here, so Mac OS X will automatically
 			 * mount the volume without attempting to repair the disk just
@@ -348,16 +345,14 @@ readboot(dosfs, boot)
 }
 
 int
-writefsinfo(dosfs, boot)
-	int dosfs;
-	struct bootblock *boot;
+writefsinfo(int dosfs, struct bootblock *boot)
 {
 	u_char fsinfo[MAX_SECTOR_SIZE];
 
 	if (lseek(dosfs, boot->FSInfo * boot->BytesPerSec, SEEK_SET)
 	    != boot->FSInfo * boot->BytesPerSec
 	    || read(dosfs, fsinfo, boot->BytesPerSec) != boot->BytesPerSec) {
-		perr("could not read fsinfo block");
+		fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "could not read fsinfo block", strerror(errno));
 		return FSFATAL;
 	}
 	fsinfo[0x1e8] = (u_char)boot->FSFree;
@@ -372,7 +367,7 @@ writefsinfo(dosfs, boot)
 	    != boot->FSInfo * boot->BytesPerSec
 	    || write(dosfs, fsinfo, boot->BytesPerSec)
 	    != boot->BytesPerSec) {
-		perr("Unable to write FSInfo");
+		fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to write FSInfo", strerror(errno));
 		return FSFATAL;
 	}
 	/*

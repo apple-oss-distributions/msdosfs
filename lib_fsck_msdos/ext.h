@@ -58,21 +58,9 @@
 #include <sys/types.h>
 
 #include "dosfs.h"
+#include "lib_fsck_msdos.h"
 
 #define	LOSTDIR	"LOST.DIR"
-
-/*
- * Options:
- */
-extern int alwaysno;	/* assume "no" for all questions */
-extern int alwaysyes;	/* assume "yes" for all questions */
-extern int preen;	/* we are preening */
-extern int rdonly;	/* device is opened read only (supersedes above) */
-extern int quick;	/* set to quickly check if volume is dirty */
-extern int quiet;	/* set to suppress most messages */
-extern size_t maxmem;	/* If non-zero, limit major allocations to this many bytes */
-
-extern char *fname;	/* filesystem currently checked */
 
 extern struct dosDirEntry *rootDir;
 
@@ -80,11 +68,17 @@ extern struct dosDirEntry *rootDir;
  * function declarations
  */
 int ask __P((int, const char *, ...));
+int vask __P((fsck_client_ctx_t, int, const char *, va_list));
 
 /*
  * Check filesystem given as arg
  */
-int checkfilesys(const char *);
+typedef struct check_context_t {
+    void *updater;
+    void (*startPhase)(char *description, int64_t pendingUnits, int64_t totalCount, unsigned int *completedCount, void *updater);
+    void (*endPhase)(char *description, void *updater);
+} *check_context;
+int checkfilesys(const char *fname, check_context context);
 
 /*
  * Return values of various functions

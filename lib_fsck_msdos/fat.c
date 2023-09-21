@@ -65,7 +65,7 @@
 #include <sys/param.h>
 
 #include "ext.h"
-#include "fsutil.h"
+#include "lib_fsck_msdos.h"
 
 /*
  * The following value should be a multiple of the sector size in bytes.  The
@@ -154,7 +154,7 @@ int fat_init(int fs, struct bootblock *boot)
 			fat_set = fat32_set;
 			break;
 		default:
-			pfatal("Unknown cluster mask (0x%08X)\n", boot->ClustMask);
+			fsck_print(fsck_ctx, LOG_CRIT, "Unknown cluster mask (0x%08X)\n", boot->ClustMask);
 			return FSFATAL;
 	}
 	
@@ -173,9 +173,9 @@ int fat_init(int fs, struct bootblock *boot)
 	 * TODO: Should we use a smaller number of bigger blocks to minimize the
 	 * overhead of finding a cache block?
 	 */
-	if (maxmem)
+	if (fsck_maxmem())
 	{
-		gNumCacheBlocks = (maxmem-gUseMapBytes)/FAT_CHUNK_SIZE;
+		gNumCacheBlocks = (fsck_maxmem()-gUseMapBytes)/FAT_CHUNK_SIZE;
 	}
 	else
 	{
@@ -185,7 +185,7 @@ int fat_init(int fs, struct bootblock *boot)
 	if (fat_cache == NULL)
 	{
 		freeUseMap();
-		perr("No memory for FAT cache headers\n");
+		fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "No memory for FAT cache headers\n", strerror(errno));
 		return FSFATAL;
 	}
 	fat_cache_buffers = calloc(gNumCacheBlocks, FAT_CHUNK_SIZE);
@@ -194,7 +194,7 @@ int fat_init(int fs, struct bootblock *boot)
 		free(fat_cache);
 		fat_cache = NULL;
 		freeUseMap();
-		perr("No memory for FAT cache buffers\n");
+		fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "No memory for FAT cache buffers\n", strerror(errno));
 		return FSFATAL;
 	}
 	
@@ -225,8 +225,8 @@ int fat_init(int fs, struct bootblock *boot)
 	temp = boot->ClustMask & (0xFFFFFF00+boot->Media);
 	if (value != temp)
 	{
-		pwarn("FAT[0] is incorrect (is 0x%X; should be 0x%X)\n", value, temp);
-		if (ask(1, "Correct"))
+		fsck_print(fsck_ctx, LOG_INFO, "Warning: FAT[0] is incorrect (is 0x%X; should be 0x%X)\n", value, temp);
+		if (fsck_ask(fsck_ctx, 1, "Correct"))
 		{
 			mod = fat_set(0, temp);
 			if (!mod)
@@ -280,8 +280,8 @@ int fat_init(int fs, struct bootblock *boot)
 		temp = boot->ClustMask >> 2;
 	if ((value & temp) < (CLUST_EOFS & temp))
 	{
-		pwarn("FAT[1] is incorrect\n");
-		if (ask(1, "Correct"))
+		fsck_print(fsck_ctx, LOG_INFO, "Warning: FAT[1] is incorrect\n");
+		if (fsck_ask(fsck_ctx, 1, "Correct"))
 		{
 			/*
 			 * Set the lower bits of FAT[1] to all ones (i.e. the
@@ -349,7 +349,7 @@ fat_cache_find(uint32_t offset)
 
 		if (found->dirty)
 		{
-//			fprintf(stderr, "Writing FAT sector %u\n", found->sector);
+//			fsck_print(ctx, LOG_ERR, "Writing FAT sector %u\n", found->sector);
 			
 			/* Byte offset of start of active FAT */
 			io_offset = (gBoot->ResSectors + activeFAT * gBoot->FATsecs) * gBoot->BytesPerSec;
@@ -359,12 +359,12 @@ fat_cache_find(uint32_t offset)
 			
 			if (lseek(gFS, io_offset, SEEK_SET) != io_offset)
 			{
-				perr("Unable to seek FAT");
+				fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to seek FAT", strerror(errno));
 				return NULL;
 			}
 			if (deblock_write(gFS, found->buffer, found->length) != found->length)
 			{
-				perr("Unable to write FAT");
+				fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to write FAT", strerror(errno));
 				return NULL;
 			}
 			
@@ -382,15 +382,15 @@ fat_cache_find(uint32_t offset)
 		io_offset += chunk * FAT_CHUNK_SIZE;
 		
 		/* Read in the sector */
-//		fprintf(stderr, "Reading FAT sector %u\n", found->sector);
+//		fsck_print(ctx, LOG_ERR, "Reading FAT sector %u\n", found->sector);
 		if (lseek(gFS, io_offset, SEEK_SET) != io_offset)
 		{
-			perr("Unable to seek FAT");
+			fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to seek FAT", strerror(errno));
 			return NULL;
 		}
 		if (deblock_read(gFS, found->buffer, length) != length)
 		{
-			perr("Unable to read FAT");
+			fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to read FAT", strerror(errno));
 			return NULL;
 		}
 	}
@@ -438,7 +438,7 @@ static cl_t fat32_get(cl_t cluster)
 	
 	if (cluster >= gBoot->NumClusters)
 	{
-		fprintf(stderr, "fat32_get: invalid cluster (%u)\n", cluster);
+		fsck_print(fsck_ctx, LOG_ERR, "fat32_get: invalid cluster (%u)\n", cluster);
 		return CLUST_ERROR;
 	}
 	
@@ -467,7 +467,7 @@ static cl_t fat16_get(cl_t cluster)
 	
 	if (cluster >= gBoot->NumClusters)
 	{
-		fprintf(stderr, "fat16_get: invalid cluster (%u)\n", cluster);
+		fsck_print(fsck_ctx, LOG_ERR, "fat16_get: invalid cluster (%u)\n", cluster);
 		return CLUST_ERROR;
 	}
 	
@@ -496,7 +496,7 @@ static cl_t fat12_get(cl_t cluster)
 
 	if (cluster >= gBoot->NumClusters)
 	{
-		fprintf(stderr, "fat16_get: invalid cluster (%u)\n", cluster);
+		fsck_print(fsck_ctx, LOG_ERR, "fat16_get: invalid cluster (%u)\n", cluster);
 		return CLUST_ERROR;
 	}
 	
@@ -535,7 +535,7 @@ static int fat32_set(cl_t cluster, cl_t value)
 
 	if (cluster >= gBoot->NumClusters)
 	{
-		fprintf(stderr, "fat32_set: invalid cluster (%u)\n", cluster);
+		fsck_print(fsck_ctx, LOG_ERR, "fat32_set: invalid cluster (%u)\n", cluster);
 		return FSFATAL;
 	}
 
@@ -572,7 +572,7 @@ static int fat16_set(cl_t cluster, cl_t value)
 
 	if (cluster >= gBoot->NumClusters)
 	{
-		fprintf(stderr, "fat16_set: invalid cluster (%u)\n", cluster);
+		fsck_print(fsck_ctx, LOG_ERR, "fat16_set: invalid cluster (%u)\n", cluster);
 		return FSFATAL;
 	}
 	
@@ -606,7 +606,7 @@ static int fat12_set(cl_t cluster, cl_t value)
 
 	if (cluster >= gBoot->NumClusters)
 	{
-		fprintf(stderr, "fat16_set: invalid cluster (%u)\n", cluster);
+		fsck_print(fsck_ctx, LOG_ERR, "fat16_set: invalid cluster (%u)\n", cluster);
 		return FSFATAL;
 	}
 	
@@ -661,15 +661,15 @@ int fat_flush(void)
 			/* Byte offset of current chunk */
 			offset += fat_cache[i].chunk * FAT_CHUNK_SIZE;
 			
-//			fprintf(stderr, "Flushing FAT sector %u\n", fat_cache[i].sector);
+//			fsck_print(ctx, LOG_ERR, "Flushing FAT sector %u\n", fat_cache[i].sector);
 			if (lseek(gFS, offset, SEEK_SET) != offset)
 			{
-				perr("Unable to seek FAT");
+				fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to seek FAT", strerror(errno));
 				return FSFATAL;
 			}
 			if (deblock_write(gFS, fat_cache[i].buffer, fat_cache[i].length) != fat_cache[i].length)
 			{
-				perr("Unable to write FAT");
+				fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to write FAT", strerror(errno));
 				return FSFATAL;
 			}
 			
@@ -711,8 +711,8 @@ int fat_free_unused(void)
 			{
 				if (count == 0)
 				{
-					pwarn("Found orphan cluster(s)\n");
-					fix = ask(1, "Fix");
+					fsck_print(fsck_ctx, LOG_INFO, "Warning: Found orphan cluster(s)\n");
+					fix = fsck_ask(fsck_ctx, 1, "Fix");
 				}
 				++count;
 				if (fix)
@@ -730,12 +730,12 @@ int fat_free_unused(void)
 	{
 		if (fix)
 		{
-			pwarn("Marked %u clusters as free\n", count);
+			fsck_print(fsck_ctx, LOG_INFO, "Warning: Marked %u clusters as free\n", count);
 			err |= FSFATMOD;
 		}
 		else
 		{
-			pwarn("Found %u orphaned clusters\n", count);
+			fsck_print(fsck_ctx, LOG_INFO, "Warning: Found %u orphaned clusters\n", count);
 			err |= FSERROR;
 		}
 	}
@@ -750,12 +750,12 @@ int fat_free_unused(void)
 		fix = 0;
 		if (gBoot->FSFree != gBoot->NumFree) {
 			if (gBoot->FSFree == 0xFFFFFFFFU)
-				pwarn("Free space in FSInfo block is unset (should be %d)\n",
+				fsck_print(fsck_ctx, LOG_INFO, "Warning: Free space in FSInfo block is unset (should be %d)\n",
 				      gBoot->NumFree);
 			else
-				pwarn("Free space in FSInfo block (%d) not correct (%d)\n",
+				fsck_print(fsck_ctx, LOG_INFO, "Warning: Free space in FSInfo block (%d) not correct (%d)\n",
 				      gBoot->FSFree, gBoot->NumFree);
-			if (ask(1, "Fix")) {
+			if (fsck_ask(fsck_ctx, 1, "Fix")) {
 				gBoot->FSFree = gBoot->NumFree;
 				fix = 1;
 			}
@@ -785,7 +785,7 @@ int isdirty(int fs, struct bootblock *boot, int fat)
 
        buffer = malloc(boot->BytesPerSec);
        if (buffer == NULL) {
-               perr("No space for FAT sector");
+               fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "No space for FAT sector", strerror(errno));
                return 1;               /* Assume it was dirty */
        }
 
@@ -793,12 +793,12 @@ int isdirty(int fs, struct bootblock *boot, int fat)
        offset *= boot->BytesPerSec;
 
        if (lseek(fs, offset, SEEK_SET) != offset) {
-               perr("Unable to read FAT");
+               fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to read FAT", strerror(errno));
                goto ERROR;
        }
 
        if (deblock_read(fs, buffer, boot->BytesPerSec) != boot->BytesPerSec) {
-               perr("Unable to read FAT");
+               fsck_print(fsck_ctx, LOG_CRIT, "%s (%s)\n", "Unable to read FAT", strerror(errno));
                goto ERROR;
        }
 
@@ -850,8 +850,7 @@ int fat_mark_clean(void)
  * Get type of reserved cluster
  */
 char *
-rsrvdcltype(cl)
-	cl_t cl;
+rsrvdcltype(cl_t cl)
 {
 	if (cl == CLUST_FREE)
 		return "free";
@@ -925,11 +924,11 @@ int initUseMap(struct bootblock *boot)
 	if (useMap != NULL)
 		free(useMap);
 	gUseMapBytes = clusters/8;
-	if (maxmem != 0 && maxmem < (gUseMapBytes + FAT_CHUNK_SIZE))
+	if (fsck_maxmem() != 0 && fsck_maxmem() < (gUseMapBytes + FAT_CHUNK_SIZE))
 	{
-		pfatal("Cannot allocate %zd bytes for usemap (maxmem=%zd, clusters=%d)\n"
+		fsck_print(fsck_ctx, LOG_CRIT, "Cannot allocate %zd bytes for usemap (maxmem=%zd, clusters=%d)\n"
 			"maxmem must be at least %zd\n",
-			gUseMapBytes, maxmem, clusters, gUseMapBytes + FAT_CHUNK_SIZE);
+			gUseMapBytes, fsck_maxmem(), clusters, gUseMapBytes + FAT_CHUNK_SIZE);
 		useMap = NULL;
 	}
 	else

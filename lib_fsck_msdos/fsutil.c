@@ -73,17 +73,9 @@
 #include "ext.h"
 #include "fsutil.h"
 
-static const char *dev = NULL;
-
 extern char *__progname;
 
 static void vmsg __P((int, const char *, va_list));
-
-void
-setcdevname(const char *cd)
-{
-	dev = cd;
-}
 
 /*VARARGS*/
 void
@@ -110,24 +102,19 @@ errexit(va_alist)
 }
 
 static void
-vmsg(fatal, fmt, ap)
-	int fatal;
-	const char *fmt;
-	va_list ap;
+vmsg(int fatal, const char *fmt, va_list ap)
 {
-	if (!fatal && preen)
-		(void) printf("%s: ", dev);
+	if (!fatal && fsck_preen())
+		(void) printf("%s: ", fsck_dev());
 	
-	if (!quiet)
+	if (!fsck_quiet())
 		(void) vprintf(fmt, ap);
 
-	if (fatal && preen)
+	if (fatal && fsck_preen())
 		(void) printf("\n");
 
-	if (fatal && preen) {
-		(void) printf(
-		    "%s: UNEXPECTED INCONSISTENCY; RUN %s MANUALLY.\n",
-		    dev, __progname);
+	if (fatal && fsck_preen()) {
+		(void) printf("%s: UNEXPECTED INCONSISTENCY; RUN %s MANUALLY.\n", fsck_dev(), __progname);
 		exit(8);
 	}
 }
@@ -151,7 +138,7 @@ pfatal(va_alist)
 	va_start(ap);
 	fmt = va_arg(ap, const char *);
 #endif
-	vmsg(1, fmt, ap);
+	vpfatal(NULL, fmt, ap);
 	va_end(ap);
 }
 
@@ -173,7 +160,7 @@ pwarn(va_alist)
 	va_start(ap);
 	fmt = va_arg(ap, const char *);
 #endif
-	vmsg(0, fmt, ap);
+	vpwarn(NULL, fmt, ap);
 	va_end(ap);
 }
 
@@ -181,8 +168,74 @@ pwarn(va_alist)
 __private_extern__
 #endif
 void
-perr(s)
-	const char *s;
+perrno(const char *s)
 {
 	pfatal("%s (%s)\n", s, strerror(errno));
+}
+
+void perr(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	vperr(NULL, fmt, ap);
+	va_end(ap);
+}
+
+void vpfatal(fsck_client_ctx_t client, const char *fmt, va_list ap)
+{
+	vmsg(1, fmt, ap);
+}
+
+void vpwarn(fsck_client_ctx_t client, const char *fmt, va_list ap)
+{
+	vmsg(0, fmt, ap);
+}
+
+void vperr(fsck_client_ctx_t client, const char *fmt, va_list ap)
+{
+	if (fsck_preen()) {
+		(void) fprintf(stderr, "%s: ", fsck_dev());
+	}
+	if (!fsck_quiet()) {
+		(void) vfprintf(stderr, fmt, ap);
+	}
+}
+
+void vprint(fsck_client_ctx_t client, int level, const char *fmt, va_list ap)
+{
+    switch (level) {
+        case LOG_INFO:
+            vprintf(fmt, ap);
+            break;
+        case LOG_ERR:
+            vperr(client, fmt, ap);
+            break;
+        case LOG_CRIT:
+            vpfatal(client, fmt, ap);
+            break;
+        default:
+            break;
+    }
+}
+
+void fsck_print(lib_fsck_ctx_t c, int level, const char *fmt, ...)
+{
+	if (c.print) {
+		va_list ap;
+		va_start(ap, fmt);
+		c.print(c.client_ctx, level, fmt, ap);
+		va_end(ap);
+	}
+}
+
+int fsck_ask(lib_fsck_ctx_t c, int def, const char *fmt, ...)
+{
+	if (c.ask) {
+		va_list ap;
+		va_start(ap, fmt);
+		int retval = c.ask(c.client_ctx, def, fmt, ap);
+		va_end(ap);
+		return retval;
+	}
+	return -1;
 }

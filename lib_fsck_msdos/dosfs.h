@@ -87,7 +87,9 @@ struct bootblock {
 
 	/* and some more calculated values */
 	u_int	flags;			/* some flags: */
+#ifndef FAT32
 #define	FAT32		1		/* this is a FAT32 filesystem */
+#endif
 					/*
 					 * Maybe, we should separate out
 					 * various parts of FAT32?	XXX
