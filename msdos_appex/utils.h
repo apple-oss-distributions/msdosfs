@@ -114,11 +114,6 @@ typedef NS_ENUM(uint8_t, volumeLabelSrc) {
 +(bool)isDotOrDotDot:(char *)name
               length:(size_t)length;
 
-+(NSError * _Nullable)syncReadFromDevice:(FSBlockDeviceResource *)device
-                                   into:(void *)buffer
-                             startingAt:(off_t)offset
-                                 length:(size_t)nbyte;
-
 +(NSError * _Nullable)syncMetaReadFromDevice:(FSBlockDeviceResource *)device
                                         into:(void *)buffer
                                   startingAt:(off_t)offset
@@ -130,10 +125,10 @@ typedef NS_ENUM(uint8_t, volumeLabelSrc) {
                                  length:(size_t)nbyte;
 
 +(NSError * _Nullable)syncMetaClearToDevice:(FSBlockDeviceResource *)device
-							  rangesToClear:(NSArray<FSMetadataBlockRange *> *)rangesToClear;
+                              rangesToClear:(NSArray<FSMetadataRange *> *)rangesToClear;
 
 +(NSError * _Nullable)syncMetaPurgeToDevice:(FSBlockDeviceResource *)device
-                              rangesToPurge:(NSArray<FSMetadataBlockRange *> *)rangesToPurge;
+                              rangesToPurge:(NSArray<FSMetadataRange *> *)rangesToPurge;
 
 +(NSData *)getMD5Digest:(uint32_t)length
                 forData:(const char *)data
@@ -142,6 +137,11 @@ typedef NS_ENUM(uint8_t, volumeLabelSrc) {
 +(bool)containsReadOnlyAttributes:(nonnull FSItemSetAttributesRequest *)attributes;
 
 +(void)enableMetaRW;
+
+#if DEBUG
+/* For testing use only. */
++(void)disableMetaRW;
+#endif
 
 +(void)setGMTDiffOffset;
 

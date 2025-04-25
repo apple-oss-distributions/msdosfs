@@ -33,7 +33,7 @@
                       inDir:(FATItem * _Nullable)parentDir
                  startingAt:(uint32_t)firstCluster
                    withData:(DirEntryData * _Nullable)entryData
-                    andName:(nonnull NSString *)name
+                    andName:(FSFileName *)name
 {
     self = [super initInVolume:volume
                          inDir:parentDir
@@ -82,7 +82,7 @@
                                                    uint32_t lastAllocatedCluster,
                                                    uint32_t numAllocated) {
             if (allocError) {
-                os_log_error(fskit_std_log(), "%s: Failed to allocate clusters. Error = %@.", __func__, allocError);
+                os_log_error(OS_LOG_DEFAULT, "%s: Failed to allocate clusters. Error = %@.", __func__, allocError);
                 error = allocError;
             }
         }];
@@ -93,7 +93,7 @@
                                       ofItem:self
                                 replyHandler:^(NSError *freeError) {
             if (freeError) {
-                os_log_error(fskit_std_log(), "%s: Failed to free clusters. Error = %@.", __func__, freeError);
+                os_log_error(OS_LOG_DEFAULT, "%s: Failed to free clusters. Error = %@.", __func__, freeError);
                 error = freeError;
             }
         }];
@@ -101,40 +101,39 @@
     return error;
 }
 
--(void)blockmapRange:(NSRange)range
-             startIO:(bool)startIO
+-(void)blockmapOffset:(off_t)offset
+               length:(size_t)length
                flags:(FSBlockmapFlags)flags
-         operationID:(uint64_t)operationID
-         usingBlocks:(FSExtentPacker)packer
+         operationID:(FSOperationID)operationID
+              packer:(FSExtentPacker *)packer
         replyHandler:(nonnull void (^)(NSError * _Nullable error))reply
 {
     __block NSError *error = nil;
     uint64_t clusterSize = self.volume.systemInfo.bytesPerCluster;
-    uint64_t offset = range.location;
-    uint64_t length = range.length;
 
-    os_log_debug(fskit_std_log(), "%s: offset: %llu, length: %llu, startIO: %d, flags: %u, operationID: %llu.\n", __func__, offset, length, startIO, flags, operationID);
+
+    os_log_debug(OS_LOG_DEFAULT, "%s: offset: %llu, length: %zu, flags: %lu, operationID: %lu.\n", __func__, offset, length, flags, operationID);
 
     /* Check that we got either FSKIT_FLAGS_WRITE or FSKIT_FLAGS_READ in flags, or we're in no-IO case. */
     bool isWrite;
     if (flags & FSBlockmapFlagsWrite) {
         isWrite = true;
-    } else if ((flags & FSBlockmapFlagsRead) || (startIO == false && operationID == 0)) {
-        /* In case of startIO == false && operationID == 0, no IO will be performed by the kernel.
+    } else if ((flags & FSBlockmapFlagsRead) || operationID == FSOperationIDUnspecified) {
+        /* In case operationID == FSOperationIDUnspecified, no IO will be performed by the kernel.
           We treat this case as read, as we don't expect an corresponding endIO call. */
         isWrite = false;
     } else {
-        os_log_error(fskit_std_log(), "%s: Neither FSKIT_FLAGS_WRITE nor FSKIT_FLAGS_READ bit is set in flags.\n", __func__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Neither FSKIT_FLAGS_WRITE nor FSKIT_FLAGS_READ bit is set in flags.\n", __func__);
         return reply(fs_errorForPOSIXError(EINVAL));
     }
 
     if (length == 0) {
-        os_log(fskit_std_log(), "%s: Requested length = 0. Exit with SUCCESS and numOfExtentsFetched = 0.", __func__);
+        os_log(OS_LOG_DEFAULT, "%s: Requested length = 0. Exit with SUCCESS and numOfExtentsFetched = 0.", __func__);
         return reply(nil);
     }
 
     if (offset + length > [self maxFileSize]) {
-        os_log_error(fskit_std_log(), "%s: Given length + offset is too big.\n", __func__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Given length + offset is too big.\n", __func__);
         return reply(fs_errorForPOSIXError(EFBIG));
     }
 
@@ -144,21 +143,20 @@
                                     replyHandler:^(NSError * _Nullable fatError) {
             if (fatError) {
                 /* just log the error, don't fail the blockmap. */
-                os_log_error(fskit_std_log(), "%s: Couldn't set the dirty bit. Error = %@. \n", __func__, fatError);
+                os_log_error(OS_LOG_DEFAULT, "%s: Couldn't set the dirty bit. Error = %@. \n", __func__, fatError);
             }
         }];
     }
 
     uint64_t originalAllocatedSize  = self.numberOfClusters * clusterSize;
     uint64_t originalSize           = [self.entryData getSize];
-    uint64_t originalValidLength    = [self.entryData getValidDataLength];
     uint64_t effectiveLength        = length;
     uint64_t writeEndOffset         = offset + length;
     uint64_t newAllocatedSize       = originalAllocatedSize;
     uint64_t newSize                = writeEndOffset;
 
     if (!isWrite && offset >= originalAllocatedSize) {
-        os_log_error(fskit_std_log(), "%s: Read with requested offset (%llu) >= file allocated size (%llu). Exiting.", __func__, offset, originalAllocatedSize);
+        os_log_error(OS_LOG_DEFAULT, "%s: Read with requested offset (%llu) >= file allocated size (%llu). Exiting.", __func__, offset, originalAllocatedSize);
         return reply(fs_errorForPOSIXError(EINVAL));
     }
 
@@ -166,7 +164,7 @@
         if (originalAllocatedSize < originalSize) {
             /* The file is probably corrupted in such case.
              Therefore we don't allow writing to this file. */
-            os_log_error(fskit_std_log(), "%s: allocated size (%llu) < file size (%llu). The file is probably corrupted. Exiting.",
+            os_log_error(OS_LOG_DEFAULT, "%s: allocated size (%llu) < file size (%llu). The file is probably corrupted. Exiting.",
                       __func__, originalAllocatedSize, originalSize);
             return reply(fs_errorForPOSIXError(EIO));
         }
@@ -178,14 +176,14 @@
                             allowPartial:true
                             mustBeContig:false];
                 if (error) {
-                    os_log_error(fskit_std_log(), "%s: Couldn't truncate file. Error = %@.", __func__, error);
+                    os_log_error(OS_LOG_DEFAULT, "%s: Couldn't truncate file. Error = %@.", __func__, error);
                     return reply(error);
                 }
                 newAllocatedSize = self.numberOfClusters * clusterSize;
                 if (newAllocatedSize <= offset) {
                     /* We couldn't allocate enough space to even get to the offset.
                      Free the newly allocated clusters and exit. */
-                    os_log_error(fskit_std_log(), "%s: Failed to allocate enough clusters for wanted offset and length.", __func__);
+                    os_log_error(OS_LOG_DEFAULT, "%s: Failed to allocate enough clusters for wanted offset and length.", __func__);
                     [self truncateTo:originalSize
                         allowPartial:false
                         mustBeContig:false];
@@ -194,7 +192,7 @@
                     /* Couldn't allocate as much as needed, adjusting the length to write. */
                     effectiveLength = newAllocatedSize - offset;
                     newSize = newAllocatedSize;
-                    os_log_debug(fskit_std_log(), "%s: Couldn't allocate all clusters for wanted offset and length. Length to write = %llu (instead of %llu).\n", __func__, effectiveLength, length);
+                    os_log_debug(OS_LOG_DEFAULT, "%s: Couldn't allocate all clusters for wanted offset and length. Length to write = %llu (instead of %zu).\n", __func__, effectiveLength, length);
                 }
             }
             /* Update dir entry with new size. Don't flush it until we know that the IO succeeded (in endIO). */
@@ -203,27 +201,27 @@
     }
 
     /* Do the actual blockmap work */
-    uint64_t maxValidOffset = isWrite ? MAX(offset + effectiveLength, originalValidLength) : originalValidLength;
     [self fetchFileExtentsFrom:offset
                             to:newAllocatedSize
-               lastValidOffset:maxValidOffset
                    usingBlocks:packer
                   replyHandler:^(NSError *fetchError) {
         if (fetchError) {
-            os_log_error(fskit_std_log(), "%s: Couldn't fetch file extents. Error = %@", __func__, fetchError);
+            os_log_error(OS_LOG_DEFAULT, "%s: Couldn't fetch file extents. Error = %@", __func__, fetchError);
             error = fetchError;
         }
     }];
 
     if (error == nil) {
-        if (isWrite && startIO) {
-             /* Add the request to the list only for writes with startIO = true.
+        if (isWrite &&
+            (operationID != FSOperationIDUnspecified) &&
+            self.blockmapRequests[[NSNumber numberWithUnsignedLong:operationID]] == nil) {
+             /* Add the request to the list only for the first blockmap call of a write operation.
               * (Currently MSDOS/ExFAT don't support access time updates (mounted by default with MNT_NOATIME),
-              * so there's no need to call EndBlockmap for read operations.
+              * so there's no need to call completeIO for read operations.
               * Therefore we don't need to maintain any state for such requests). */
             [self.blockmapRequests setObject:[[BlockmapRequest alloc] initWithOriginalSize:originalSize]
                                       forKey:[NSNumber numberWithUnsignedLong:operationID]];
-            /* Increment the write counter for writes with startIO = true
+            /* Increment the write counter for the first blockmap call of a write operation
              (if we got here, we know that the operation can't fail). */
             self.writeCounter++;
         }
@@ -239,19 +237,20 @@
     return reply(nil);
 }
 
--(NSError *)endIOOfRange:(NSRange)range
-                  status:(int)ioStatus
-                   flags:(FSBlockmapFlags)flags
-             operationID:(uint64_t)operationID
+-(NSError *)completeIOAtOffset:(off_t)offset
+                        length:(size_t)length
+                       status:(int)ioStatus
+                        flags:(FSCompleteIOFlags)flags
+                  operationID:(FSOperationID)operationID
 {
     uint64_t clusterSize = self.volume.systemInfo.bytesPerCluster;
-    uint64_t endOffset = range.location + range.length;
+    uint64_t endOffset = (uint64_t)offset + length;
     BlockmapRequest *blockmapRequest = nil;
     __block bool shouldFlushEntryData = false;
     NSError *error = nil;
 
-    os_log_debug(fskit_std_log(), "%s: offset: %lu, length: %lu, status: %d, flags: %u, operationID: %llu.",
-                 __func__, (unsigned long)range.location, (unsigned long)range.length, ioStatus, flags, operationID);
+    os_log_debug(OS_LOG_DEFAULT, "%s: offset: %lu, length: %lu, status: %d, flags: %lu, operationID: %lu.",
+                 __func__, (unsigned long)offset, (unsigned long)length, ioStatus, flags, operationID);
 
     if (flags & FSBlockmapFlagsRead) {
         /*
@@ -259,7 +258,7 @@
          * so there's no need to call EndBlockmap for read operations.
          * Therefore it's not allowed.
          */
-        os_log_error(fskit_std_log(), "%s: No endIO calls should be made for reads.", __func__);
+        os_log_error(OS_LOG_DEFAULT, "%s: No endIO calls should be made for reads.", __func__);
         return fs_errorForPOSIXError(EINVAL);
     }
 
@@ -270,11 +269,11 @@
      * That's ok becuase the upper layers would make sure no reclaims would be made
      * as long as we have ongoing writes.
      */
-    if (flags & FSBlockmapFlagsFileIssued) {
+    if (operationID != FSOperationIDUnspecified) {
         self.writeCounter--;
         blockmapRequest = [self.blockmapRequests objectForKey:[NSNumber numberWithUnsignedLong:operationID]];
         if (!blockmapRequest) {
-            os_log_fault(fskit_std_log(), "%s: Couldn't find blockmap request (%llu) in dictionary.", __func__, operationID);
+            os_log_fault(OS_LOG_DEFAULT, "%s: Couldn't find blockmap request (%lu) in dictionary.", __func__, operationID);
             return fs_errorForPOSIXError(EINVAL);
         }
     }
@@ -284,7 +283,7 @@
                                 replyHandler:^(NSError * _Nullable fatError) {
         if (fatError) {
             /* just log the error, don't fail the endIO. */
-            os_log_error(fskit_std_log(), "%s: Couldn't set the dirty bit. Error = %@. \n", __func__, fatError);
+            os_log_error(OS_LOG_DEFAULT, "%s: Couldn't set the dirty bit. Error = %@. \n", __func__, fatError);
         }
     }];
 
@@ -295,7 +294,7 @@
         uint64_t allocatedSize = self.numberOfClusters * clusterSize;
         if (endOffset > allocatedSize) {
             /* To write beyond the file allocated size, beginBlockmap must be called first. */
-            os_log_error(fskit_std_log(), "%s: offset + length > file's allocated size (%llu > %llu).", __func__, endOffset, allocatedSize);
+            os_log_error(OS_LOG_DEFAULT, "%s: offset + length > file's allocated size (%llu > %llu).", __func__, endOffset, allocatedSize);
             return fs_errorForPOSIXError(EINVAL);
         }
 
@@ -333,7 +332,7 @@
         if (shouldFlushEntryData && (self.isDeleted == false)) {
             error = [self flushDirEntryData];
             if (error) {
-                os_log_error(fskit_std_log(), "%s: Failed to update dir entry with new size. Error = %@.", __func__, error);
+                os_log_error(OS_LOG_DEFAULT, "%s: Failed to update dir entry with new size. Error = %@.", __func__, error);
             }
         }
     }
@@ -365,8 +364,7 @@
 
 -(void)fetchFileExtentsFrom:(uint64_t)startOffset
                          to:(uint64_t)endOffset
-            lastValidOffset:(uint64_t)lastValidOffset
-                usingBlocks:(FSExtentPacker)packer
+                usingBlocks:(FSExtentPacker *)packer
                replyHandler:(nonnull void (^)(NSError * _Nullable error))reply
 {
     __block NSError *error = nil;
@@ -406,7 +404,7 @@
         }];
 
         if (error) {
-            os_log_error(fskit_std_log(), "%s: Failed to get the next cluster(s). Error = %@.", __func__, error);
+            os_log_error(OS_LOG_DEFAULT, "%s: Failed to get the next cluster(s). Error = %@.", __func__, error);
             break;
         }
 
@@ -430,32 +428,30 @@
 
         /* Check if volumeOffset isn't in metadata zone */
         if ([self.volume isOffsetInMetadataZone:extentOffset]) {
-            os_log_error(fskit_std_log(), "%s: file offset is within metadata zone = %llu.\n", __func__, extentOffset);
+            os_log_error(OS_LOG_DEFAULT, "%s: file offset is within metadata zone = %llu.\n", __func__, extentOffset);
             error = fs_errorForPOSIXError(EFAULT);
             break;
         }
 
         /* Calculate the extent's length */
         extentLength = numContigClusters * clusterSize - (currentOffsetInFile % clusterSize);
-
-        if (currentOffsetInFile < lastValidOffset) {
-            extentType = FSExtentTypeData;
-            if (extentLength > lastValidOffset - currentOffsetInFile) {
-                /* Part of the current cluster chain is beyond the last valid offset. */
-                extentLength = lastValidOffset - currentOffsetInFile;
-            }
-        } else {
-            /* For read/write beyond valid file size (but inside allocated size limits)
-             we should pass zero-fill extents (because the on-disk data is garbage). */
-            extentType = FSExtentTypeZero;
-        }
-
         /* Make sure the returned extent length is sector-aligned. */
         extentLength = roundup(extentLength, sectorSize);
         /* Clip the extent length to UINT32_MAX, while keeping it sector-aligned. */
         extentLength = MIN(extentLength, ROUND_DOWN(UINT32_MAX, sectorSize));
 
-        if (packer(self.volume.resource, extentType, currentOffsetInFile, extentOffset, (uint32_t)extentLength)) {
+        /*
+         * All extents are DATAFILL extents for file systems which don't support
+         * sparse files.  The kernel knows that it should return zeros for reads
+         * beyond EOF.
+         */
+        extentType = FSExtentTypeData;
+
+        if (![packer packExtentWithResource:self.volume.resource
+                                       type:extentType
+                              logicalOffset:currentOffsetInFile
+                             physicalOffset:extentOffset
+                                     length:extentLength]) {
             break;
         }
 
@@ -510,18 +506,16 @@
 {
     if (isPreallocated != self.isPreAllocated) {
         /* Consider multiple FDs for the same file */
-        @synchronized (self.volume.preAllocatedOpenFiles) {
-            uint64_t curVal = [self.volume.preAllocatedOpenFiles objectAtIndex:0].unsignedLongLongValue;
-            uint64_t newVal = (isPreallocated) ? (curVal + 1) : (curVal -1);
-
-            if (curVal == 0 && !isPreallocated) {
-                os_log_error(fskit_std_log(), "%s: Expected number of preallocated files to be > 0", __FUNCTION__);
+        if (isPreallocated) {
+            [self.volume incNumberOfPreallocatedFiles];
+        } else {
+            if ([self.volume getNumberOfPreallocatedFiles] == 0) {
+                os_log_error(OS_LOG_DEFAULT, "%s: Expected number of preallocated files to be > 0", __FUNCTION__);
             } else {
-                [self.volume.preAllocatedOpenFiles replaceObjectAtIndex:0
-                                                             withObject:[NSNumber numberWithUnsignedLongLong:newVal]];
+                [self.volume decNumberOfPreallocatedFiles];
             }
-            self.isPreAllocated = isPreallocated;
         }
+        self.isPreAllocated = isPreallocated;
     }
 }
 
@@ -531,61 +525,47 @@
       replyHandler:(nonnull void (^)(NSError * _Nullable error,
                                      uint64_t allocatedSize))reply
 {
-    /* Update file size */
     uint64_t clusterSize = self.volume.systemInfo.bytesPerCluster;
-    uint64_t curAllocatedClusters = self.numberOfClusters;
     uint64_t curAllocatedSize = self.numberOfClusters * clusterSize;
-    uint64_t sizeToPreAllocate = size + curAllocatedSize;
-    uint32_t amountOfAllocatedClusters = 0;
+    uint64_t desiredFileSize = size + curAllocatedSize;
+    uint32_t desiredFileSizeInClusters = (uint32_t)(ROUND_UP(desiredFileSize, clusterSize) / clusterSize);
+    uint32_t clustersToAlloc = desiredFileSizeInClusters - self.numberOfClusters;
     NSError *err = nil;
 
-    /* Check file size not too big */
-    if (size > DOS_FILESIZE_MAX) {
+    /* Check that the new file size is not too big. */
+    if (desiredFileSize > DOS_FILESIZE_MAX) {
         return reply(fs_errorForPOSIXError(EFBIG), 0);
     }
 
-    // If we already have enough allocted clusters
-    if (size == 0) {
+    /* If we already have enough allocated clusters, do nothing. */
+    if (clustersToAlloc == 0) {
         return reply(nil, 0);
     }
 
-    uint64_t needToAllocSize = ROUND_UP(size, clusterSize);
-    uint32_t needToAllocClusters = (uint32_t)(needToAllocSize / clusterSize);
-    uint32_t currentNumOfClusters = self.numberOfClusters;
+    /*
+     * In case there's not enough space for desiredFileSize:
+     * - if allowPartial is true, allocateClusters will allocate the
+     * available clusters and return no error.  self.numberOfClusters is
+     * updated with the amount of allocated clusters.
+     * - else, allocateClusters will return ENOSPC without allocating at all.
+     */
+    err = [self truncateTo:desiredFileSize
+              allowPartial:allowPartial
+              mustBeContig:mustBeContig];
 
-    if (needToAllocClusters > 0) {
-        err = [self truncateTo:sizeToPreAllocate
-                  allowPartial:allowPartial
-                  mustBeContig:mustBeContig];
-
-        if ((needToAllocClusters) > (self.numberOfClusters - curAllocatedClusters)) {
-            // Failed to allocate needed amount of clusters.
-            // We can handle this situation if partial allocation allowed
-            // o.w we should just exit and report error.
-            if (allowPartial && (err && err.code == ENOSPC) && (self.numberOfClusters > currentNumOfClusters)) {
-                err = nil;
-            }
-            else {
-                os_log_error(fskit_std_log(), "%s: uNeedToAllocClusters %u, uAmountOfAllocatedClusters %u iErr %@",
-                          __FUNCTION__, needToAllocClusters, amountOfAllocatedClusters, err);
-                // Paranoid check to make sure we return some error
-                err = (err) ? err : fs_errorForPOSIXError(EIO);
-                return reply(err, 0);
-            }
-        }
+    if (err == nil) {
+        [self updatePreallocStatus];
     }
 
-    [self updatePreallocStatus];
     return reply(err, ((self.numberOfClusters * clusterSize) - curAllocatedSize));
 }
 
 /*
- * MSDOS always supports KOIO, make sure the inhibitKOIO property is set to false.
+ * MSDOS always supports KOIO, make sure the inhibitKernelOffloadedIO property is set to false.
  */
 -(FSItemAttributes *)getAttributes:(nonnull FSItemGetAttributesRequest *)desired
 {
     FSItemAttributes *attrs = [super getAttributes:desired];
-    attrs.inhibitKOIO = false;
     return attrs;
 }
 

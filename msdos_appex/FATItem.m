@@ -141,7 +141,7 @@
                        inDir:(FATItem * _Nullable)parentDir
                   startingAt:(uint32_t)firstCluster
                     withData:(DirEntryData * _Nullable)entryData
-                     andName:(nonnull NSString *)name
+                     andName:(FSFileName *)name
                       isRoot:(bool)isRoot;
 {
     __block NSError *error = nil;
@@ -156,6 +156,7 @@
         _name = name;
         _parentDir = parentDir;
         _isDeleted = false;
+        _includedInVolumeOUFiles = false;
 
         if (_firstCluster > 0) {
             /* Figure out the numberOfClusters and lastCluster. */
@@ -171,11 +172,16 @@
                 }
             }];
             if (error) {
-                os_log_error(fskit_std_log(), "%s: couldn't get cluster chain length. Error = %@.", __FUNCTION__, error);
+                os_log_error(OS_LOG_DEFAULT, "%s: couldn't get cluster chain length. Error = %@.", __FUNCTION__, error);
                 return nil;
             }
             _numberOfClusters = numberOfClusters;
             _lastCluster = lastCluster;
+        }
+
+        _queue = dispatch_queue_create("com.apple.fskit.msdos.itemQueue", DISPATCH_QUEUE_SERIAL);
+        if (_queue == NULL) {
+            return nil;
         }
     }
     return self;
@@ -190,12 +196,9 @@
 {
     if (self.isDeleted == false) {
         /* Consider multiple FDs for the same file */
-        @synchronized (self.volume.openUnlinkedFiles) {
-            uint64_t curVal = [self.volume.openUnlinkedFiles objectAtIndex:0].unsignedLongLongValue;
-            [self.volume.openUnlinkedFiles replaceObjectAtIndex:0
-                                                     withObject:[NSNumber numberWithUnsignedLongLong:(curVal + 1)]];
-        }
+        [self.volume incNumberOfOpenUnlinkedFiles];
         self.isDeleted = true;
+        self.includedInVolumeOUFiles = true;
     }
 }
 
@@ -212,26 +215,26 @@
     FSItemAttributes *attrs = [[FSItemAttributes alloc] init];
     struct timespec timespec = {0};
 
-    if ([desired isWanted:FSItemAttributeType]) {
+    if ([desired isAttributeWanted:FSItemAttributeType]) {
         attrs.type = (self.entryData) ? self.entryData.type : FSItemTypeUnknown;
     }
 
-    if ([desired isWanted:FSItemAttributeMode]) {
+    if ([desired isAttributeWanted:FSItemAttributeMode]) {
         attrs.mode = (0000007 << 6); // (LI_FA_MODE_RWX) TBD
     }
 
-    if ([desired isWanted:FSItemAttributeLinkCount]) {
+    if ([desired isAttributeWanted:FSItemAttributeLinkCount]) {
         attrs.linkCount = 1;
     }
 
     uint64_t allocSize = (uint64_t)self.numberOfClusters * (uint64_t)self.volume.systemInfo.bytesPerCluster;
-    if ([desired isWanted:FSItemAttributeAllocSize]) {
+    if ([desired isAttributeWanted:FSItemAttributeAllocSize]) {
         // This is true for most of the FAT item. In case the allocSize should be something else
         // for specific items, that item will have to override getAttributes and do what it should
         attrs.allocSize = allocSize;
     }
 
-    if ((self.entryData) && ([desired isWanted:FSItemAttributeSize])) {
+    if ((self.entryData) && ([desired isAttributeWanted:FSItemAttributeSize])) {
         if (self.entryData.type == FSItemTypeDirectory) {
             attrs.size = allocSize;
         } else if (self.entryData.type == FSItemTypeFile) {
@@ -239,11 +242,11 @@
         }
     }
 
-    if ([desired isWanted:FSItemAttributeFileID]) {
+    if ([desired isAttributeWanted:FSItemAttributeFileID]) {
         attrs.fileID = [self getFileID];
     }
 
-    if ([desired isWanted:FSItemAttributeParentID]) {
+    if ([desired isAttributeWanted:FSItemAttributeParentID]) {
         if (self.parentDir) {
             attrs.parentID = [self.parentDir getFileID];
         } else {
@@ -253,36 +256,34 @@
                     /* The root dir doesn't have a parent, so we use a random fileID. */
                     attrs.parentID = [self.volume getNextAvailableFileID];
                 } else {
-                    os_log_fault(fskit_std_log(), "%s: Failed to get parent id (dir item).", __FUNCTION__);
+                    os_log_fault(OS_LOG_DEFAULT, "%s: Failed to get parent id (dir item).", __FUNCTION__);
                 }
             } else {
-                os_log_fault(fskit_std_log(), "%s: Failed to get parent id (item is not a dir)", __FUNCTION__);
+                os_log_fault(OS_LOG_DEFAULT, "%s: Failed to get parent id (item is not a dir)", __FUNCTION__);
             }
         }
     }
 
-    if ([desired isWanted:FSItemAttributeFlags]) {
+    if ([desired isAttributeWanted:FSItemAttributeFlags]) {
         attrs.flags = self.entryData.bsdFlags;
     }
 
-    attrs.inhibitKOIO = false;
-
-    if (([desired isWanted:FSItemAttributeAccessTime]) && (self.entryData)) {
+    if (([desired isAttributeWanted:FSItemAttributeAccessTime]) && (self.entryData)) {
         [self.entryData getAccessTime:&timespec];
         attrs.accessTime = timespec;
     }
 
-    if (([desired isWanted:FSItemAttributeModifyTime]) && (self.entryData)) {
+    if (([desired isAttributeWanted:FSItemAttributeModifyTime]) && (self.entryData)) {
         [self.entryData getModifyTime:&timespec];
         attrs.modifyTime = timespec;
     }
 
-    if (([desired isWanted:FSItemAttributeChangeTime]) && (self.entryData)) {
+    if (([desired isAttributeWanted:FSItemAttributeChangeTime]) && (self.entryData)) {
         [self.entryData getChangeTime:&timespec];
         attrs.changeTime = timespec;
     }
 
-    if (([desired isWanted:FSItemAttributeBirthTime]) && (self.entryData)) {
+    if (([desired isAttributeWanted:FSItemAttributeBirthTime]) && (self.entryData)) {
         [self.entryData getBirthTime:&timespec];
         attrs.birthTime = timespec;
     }
@@ -339,7 +340,7 @@
                                allowPartial:false
                                mustBeContig:false];
             if (error) {
-                os_log_error(fskit_std_log(), "%s: Failed to truncate to %llu", __func__, newAttributes.size);
+                os_log_error(OS_LOG_DEFAULT, "%s: Failed to truncate to %llu", __func__, newAttributes.size);
                 return (error);
             }
         }
@@ -355,7 +356,7 @@
                 [theFileItem setPreAllocated:false];
             }
         }
-        [newAttributes wasConsumed:FSItemAttributeSize];
+        consumedAttributes |= FSItemAttributeSize;
         modified = true;
     }
 
@@ -426,7 +427,7 @@
         if ([dirItem isRoot]) {
             dirItemToUpdate = dirItem;
         } else {
-            os_log_error(fskit_std_log(), "%s: No parent dir!", __func__);
+            os_log_error(OS_LOG_DEFAULT, "%s: No parent dir!", __func__);
             return fs_errorForPOSIXError(EINVAL);
         }
     }
@@ -434,8 +435,7 @@
     return [dirItemToUpdate writeDirEntryDataToDisk:self.entryData];
 }
 
-
--(NSError *)reclaim
+-(NSError *)reclaim:(bool)isInactive
 {
     SymLinkItem *symLinkItem = [SymLinkItem dynamicCast:self];
     FileItem *fileItem = nil;
@@ -447,7 +447,7 @@
                 /* Dir's block are purged during remove() */
                 [symLinkItem purgeMetaBlocksFromCache:^(NSError * _Nullable error) {
                     if (error) {
-                        os_log_error(fskit_std_log(), "%s: Couldn't purge symlink's meta blocks. Error: %@", __func__, error);
+                        os_log_error(OS_LOG_DEFAULT, "%s: Couldn't purge symlink's meta blocks. Error: %@", __func__, error);
                     }
                 }];
             }
@@ -455,25 +455,24 @@
                                         replyHandler:^(NSError * _Nullable fatError) {
                 if (fatError) {
                     /* Log the error, keep going */
-                    os_log_error(fskit_std_log(), "%s: Couldn't set the dirty bit. Error = %@.", __func__, fatError);
+                    os_log_error(OS_LOG_DEFAULT, "%s: Couldn't set the dirty bit. Error = %@.", __func__, fatError);
                 }
             }];
             [self.volume.fatManager freeClusters:self.numberOfClusters
                                           ofItem:self
                                     replyHandler:^(NSError * _Nullable error) {
                 if (error) {
-                    os_log_error(fskit_std_log(), "%s: Failed to free clusters, error %@", __func__, error);
+                    os_log_error(OS_LOG_DEFAULT, "%s: Failed to free clusters, error %@", __func__, error);
                 }
             }];
         }
-        @synchronized (self.volume.openUnlinkedFiles) {
-            uint64_t curVal = [self.volume.openUnlinkedFiles objectAtIndex:0].unsignedLongLongValue;
-            if (curVal == 0) {
-                os_log_error(fskit_std_log(), "%s: Expected number of open-unlinked files to be > 0", __FUNCTION__);
+        if (self.includedInVolumeOUFiles == true) {
+            if ([self.volume getNumberOfOpenUnlinkedFiles] == 0) {
+                os_log_error(OS_LOG_DEFAULT, "%s: Expected number of open-unlinked files to be > 0", __FUNCTION__);
             } else {
-                [self.volume.openUnlinkedFiles replaceObjectAtIndex:0
-                                                         withObject:[NSNumber numberWithUnsignedLongLong:(curVal - 1)]];
+                [self.volume decNumberOfOpenUnlinkedFiles];
             }
+            self.includedInVolumeOUFiles = false;
         }
     }
 
@@ -487,28 +486,31 @@
                                         replyHandler:^(NSError * _Nullable fatError) {
                 if (fatError) {
                     /* Log the error, keep going */
-                    os_log_error(fskit_std_log(), "%s: Couldn't set the dirty bit. Error = %@.", __func__, fatError);
+                    os_log_error(OS_LOG_DEFAULT, "%s: Couldn't set the dirty bit. Error = %@.", __func__, fatError);
                 }
             }];
             [self.volume.fatManager freeClusters:(uint32_t)(allocatedClusters - usedClusters)
                                           ofItem:fileItem
                                     replyHandler:^(NSError * _Nullable error) {
                 if (error) {
-                    os_log_error(fskit_std_log(), "%s: Failed to free preallocated clusters, error %d", __FUNCTION__, (int)error.code);
+                    os_log_error(OS_LOG_DEFAULT, "%s: Failed to free preallocated clusters, error %d", __FUNCTION__, (int)error.code);
                 }
             }];
             [fileItem setPreAllocated:false];
         }
     }
 
-    dirItem = [DirItem dynamicCast:self];
-    if (dirItem) {
-        /*
-         * If this is a dir, free its dir name cache if exists.
-         * We're not expected to hold a pool slot at this point, so don't
-         * attempt to free it.
-         */
-        [self.volume.nameCachePool removeNameCacheForDir:dirItem];
+    if (isInactive == false) {
+        /* We only remove the directory's dir name cache during reclaim */
+        dirItem = [DirItem dynamicCast:self];
+        if (dirItem) {
+            /*
+             * If this is a dir, free its dir name cache if exists.
+             * We're not expected to hold a pool slot at this point, so don't
+             * attempt to free it.
+             */
+            [self.volume.nameCachePool removeNameCacheForDir:dirItem];
+        }
     }
     return nil;
 }
@@ -520,7 +522,7 @@
 -(void)purgeMetaBlocksFromCache:(void(^)(NSError * _Nullable))reply
 {
     if ([FileItem dynamicCast:self]) {
-        os_log_error(fskit_std_log(), "%s: Should not be called for a file item", __func__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Should not be called for a file item", __func__);
     }
     return reply(fs_errorForPOSIXError(ENOTSUP));
 }
@@ -534,7 +536,7 @@
                        inDir:(FATItem * _Nullable)parentDir
                   startingAt:(uint32_t)firstCluster
                     withData:(DirEntryData * _Nullable)entryData
-                     andName:(nonnull NSString *)name
+                     andName:(FSFileName *)name
 {
     // TODO add support here or in subclass for reading the length from disk etc.
     self = [super initInVolume:volume
@@ -643,10 +645,10 @@
 -(void)purgeMetaBlocksFromCache:(void(^)(NSError * _Nullable))reply
 {
     uint32_t sizeLeftToPurge = (uint32_t)ROUND_UP([self.entryData getValidDataLength], self.volume.systemInfo.bytesPerSector);
-    NSMutableArray<FSMetadataBlockRange *> *rangesToPurge = [NSMutableArray array];
+    NSMutableArray<FSMetadataRange *> *rangesToPurge = [NSMutableArray array];
     uint32_t startCluster = self.firstCluster;
     __block uint32_t numOfContigClusters = 0;
-    FSMetadataBlockRange *blockRange = nil;
+    FSMetadataRange *blockRange = nil;
     __block uint32_t nextCluster = 0;
     uint32_t totalNumOfClusters = 0;
     uint32_t availableLength = 0;
@@ -655,7 +657,7 @@
     /*
      * The inner loop goes through the allocated clusters,
      * and saves up-to MAX_META_BLOCK_RANGES ranges in the array.
-     * The outer loop calls synchronousMetadataPurge: for these ranges.
+     * The outer loop calls metadataPurge: for these ranges.
      * We exit both loops once we reach the end of the cluster chain.
      */
     while (sizeLeftToPurge && [self.volume.systemInfo isClusterValid:startCluster]) {
@@ -665,7 +667,7 @@
                                                                             uint32_t length,
                                                                             uint32_t nextClusterChainStart) {
                 if (error) {
-                    os_log_error(fskit_std_log(), "%s: Failed to get clusters chain. Error: %@", __func__, error);
+                    os_log_error(OS_LOG_DEFAULT, "%s: Failed to get clusters chain. Error: %@", __func__, error);
                     return reply(error);
                 }
 
@@ -675,7 +677,7 @@
 
             totalNumOfClusters += numOfContigClusters;
             if (totalNumOfClusters > self.numberOfClusters) {
-                os_log_error(fskit_std_log(), "%s: There are more clusters than expected, exiting", __func__);
+                os_log_error(OS_LOG_DEFAULT, "%s: There are more clusters than expected, exiting", __func__);
                 return reply(nil);
             }
 
@@ -686,11 +688,11 @@
              * the symlink is contiguous or not.
              */
             availableLength = self.volume.systemInfo.bytesPerCluster * numOfContigClusters;
-            blockRange = [FSMetadataBlockRange rangeWithOffset:[self.volume.systemInfo offsetForCluster:startCluster]
-                                                   blockLength:MIN(availableLength, sizeLeftToPurge)
-                                                numberOfBlocks:1];
+            blockRange = [FSMetadataRange rangeWithOffset:[self.volume.systemInfo offsetForCluster:startCluster]
+                                            segmentLength:MIN(availableLength, sizeLeftToPurge)
+                                             segmentCount:1];
 
-            sizeLeftToPurge -= blockRange.blockLength;
+            sizeLeftToPurge -= blockRange.segmentLength;
             [rangesToPurge addObject:blockRange];
 
             if (sizeLeftToPurge == 0) {
@@ -709,7 +711,7 @@
         error = [Utilities syncMetaPurgeToDevice:self.volume.resource
                            rangesToPurge:rangesToPurge];
         if (error) {
-            os_log_error(fskit_std_log(), "%s: Couldn't purge meta blocks. Error = %@.", __FUNCTION__, error);
+            os_log_error(OS_LOG_DEFAULT, "%s: Couldn't purge meta blocks. Error = %@.", __FUNCTION__, error);
             break;
         }
 
@@ -726,11 +728,11 @@
 {
     FSItemAttributes *attrs = [super getAttributes:desired];
 
-    if ([desired isWanted:FSItemAttributeType]) {
+    if ([desired isAttributeWanted:FSItemAttributeType]) {
         attrs.type = FSItemTypeSymlink;
     }
 
-    if ([desired isWanted:FSItemAttributeSize]) {
+    if ([desired isAttributeWanted:FSItemAttributeSize]) {
         attrs.size = self.symlinkLength;
     }
     

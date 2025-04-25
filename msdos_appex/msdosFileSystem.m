@@ -27,7 +27,7 @@
 
 /** Simple struct to hold required resource and filesystem to call wipeFS method from FSUnaryFileSystem */
 typedef struct {
-    FSMessageConnection *fsMsgConn;
+    FSTask *fsTask;
     FSBlockDeviceResource* resource;
     FSUnaryFileSystem* fs;
 } NewfsCtxAppex;
@@ -44,19 +44,19 @@ static void
 fsckPrintFunction(fsck_client_ctx_t ctx, int level, const char *fmt, va_list ap)
 {
     if(ctx) {
-        FSMessageConnection *fsMsgConn = (__bridge FSMessageConnection *) ctx;
-        if (fsMsgConn) {
+        FSTask *fsTask = (__bridge FSTask *) ctx;
+        if (fsTask) {
             NSString *message = [[NSString alloc] initWithFormat:[NSString stringWithUTF8String:fmt] arguments:ap];
             /* Remove trailing \n if there are any, as logMessage adds it later. */
             if ([message hasSuffix:@"\n"]) {
                 message = [message substringToIndex:[message length] - 1];
             }
-            [fsMsgConn logMessage:message];
+            [fsTask logMessage:message];
         } else {
-            os_log_error(fskit_std_log(), "%s: No message connection object, can't log message", __FUNCTION__);
+            os_log_error(OS_LOG_DEFAULT, "%s: No message connection object, can't log message", __FUNCTION__);
         }
     } else {
-        os_log_error(fskit_std_log(), "%s: Context is null, can't log message", __FUNCTION__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Context is null, can't log message", __FUNCTION__);
     }
 }
 
@@ -92,19 +92,19 @@ newfsPrintFunction(newfs_client_ctx_t ctx, int level, const char *fmt, va_list a
 {
     if(ctx) {
         NewfsCtxAppex *newfsCtx = (NewfsCtxAppex *)ctx;
-        if(newfsCtx->fsMsgConn) {
-            FSMessageConnection *fsMsgConn = newfsCtx->fsMsgConn;
+        if(newfsCtx->fsTask) {
+            FSTask *fsTask = newfsCtx->fsTask;
             NSString *message = [[NSString alloc] initWithFormat:[NSString stringWithUTF8String:fmt] arguments:ap];
             /* Remove trailing \n if there are any, as logMessage adds it later. */
             if ([message hasSuffix:@"\n"]) {
                 message = [message substringToIndex:[message length] - 1];
             }
-            [fsMsgConn logMessage:message];
+            [fsTask logMessage:message];
         } else {
-            os_log_error(fskit_std_log(), "%s: No message connection object, can't log message", __FUNCTION__);
+            os_log_error(OS_LOG_DEFAULT, "%s: No message connection object, can't log message", __FUNCTION__);
         }
     } else {
-        os_log_error(fskit_std_log(), "%s: Context is null, can't log message", __FUNCTION__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Context is null, can't log message", __FUNCTION__);
     }
 }
 
@@ -114,117 +114,116 @@ int wipeFSCallback(newfs_client_ctx_t ctx, WipeFSProperties wipeFSProps)
     NewfsCtxAppex *newfsCtx;
     FSUnaryFileSystem *fsSimpleFS;
     FSBlockDeviceResource *resource;
-    NSMutableIndexSet *including = [NSMutableIndexSet indexSet];
-    NSMutableIndexSet *excluding = [NSMutableIndexSet indexSet];
     if(!ctx) {
-        os_log_error(fskit_std_log(), "%s: Context is null, can't wipe resource", __FUNCTION__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Context is null, can't wipe resource", __FUNCTION__);
         return EINVAL;
     }
     newfsCtx = (NewfsCtxAppex *)ctx;
     if (!newfsCtx->fs) {
-        os_log_error(fskit_std_log(), "%s: Context isn't initialized, can't wipe resource", __FUNCTION__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Context isn't initialized, can't wipe resource", __FUNCTION__);
         return EINVAL;
     }
     fsSimpleFS = newfsCtx->fs;
     resource = newfsCtx->resource;
     if (resource == nil) {
-        os_log_error(fskit_std_log(), "%s: Given device is not a block device", __FUNCTION__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Given device is not a block device", __FUNCTION__);
         return EINVAL;
     }
 
-    if (wipeFSProps.include_block_length) {
-        [including addIndexesInRange:NSMakeRange(wipeFSProps.include_block_start, wipeFSProps.include_block_length)];
-    }
-    if (wipeFSProps.except_block_length) {
-        [excluding addIndexesInRange:NSMakeRange(wipeFSProps.except_block_start, wipeFSProps.except_block_length)];
-    }
     __block NSError *error = nil;
     dispatch_group_t group = dispatch_group_create();
     dispatch_group_enter(group);
     [fsSimpleFS wipeResource:resource
-             includingRanges:including
-             excludingRanges:excluding
            completionHandler:^(NSError * _Nullable err) {
         error = err;
         if (error) {
-            os_log_error(fskit_std_log(), "%s: got reply from send wipe resource request with err: %@", __FUNCTION__, error);
+            os_log_error(OS_LOG_DEFAULT, "%s: got reply from send wipe resource request with err: %@", __FUNCTION__, error);
         } else {
-            os_log_debug(fskit_std_log(), "%s: got reply from send wipe resource request with no errors", __FUNCTION__);
+            os_log_debug(OS_LOG_DEFAULT, "%s: got reply from send wipe resource request with no errors", __FUNCTION__);
         }
         dispatch_group_leave(group);
     }];
-    os_log_debug(fskit_std_log(), "%s: waiting for reply from send wipe resource request", __FUNCTION__);
+    os_log_debug(OS_LOG_DEFAULT, "%s: waiting for reply from send wipe resource request", __FUNCTION__);
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
     if (error) {
-        os_log_error(fskit_std_log(), "%s: Wipe resource error: %s", __FUNCTION__, [[error description] UTF8String]);
+        os_log_error(OS_LOG_DEFAULT, "%s: Wipe resource error: %s", __FUNCTION__, [[error description] UTF8String]);
         return (int)error.code;
     }
     return 0;
 }
 
-@interface msdosFileSystem ()
-
-@property (strong) FSProbeResult *probeResult;
-
-@end
-
 @implementation msdosFileSystem
 
--(void)didFinishLaunching
-{
-    os_log_info(fskit_std_log(), "%s: Finished launching", __FUNCTION__);
-}
-
--(void)didFinishLoading
-{
-    os_log_info(fskit_std_log(), "%s: Finished loading", __FUNCTION__);
-}
-
 - (void)loadResource:(nonnull FSResource *)resource
-             options:(FSTaskParameters *)options
+             options:(FSTaskOptions *)options
         replyHandler:(nonnull void (^)(FSVolume * _Nullable, NSError * _Nullable))reply
 {
-    os_log_info(fskit_std_log(), "%s:start", __FUNCTION__);
+    os_log_info(OS_LOG_DEFAULT, "%s:start", __FUNCTION__);
     _resource = nil;
     if ([resource isKindOfClass:[FSBlockDeviceResource class]]) {
         _resource                       = (FSBlockDeviceResource *)resource;
     }
 
-    for (NSString *opt in options) {
+    BOOL forcedLoad = NO;
+    for (NSString *opt in options.taskOptions) {
         if ([opt containsString:@"-f"]) {
-            return reply(nil, nil);
+            forcedLoad = YES;
         }
     }
 
+    __block FSProbeResult *probeResult = nil;
     __block NSError *error = nil;
-    if (!_probeResult) {
-        os_log_info(fskit_std_log(), "%s: No probeResult cached, probe to find volumeID", __FUNCTION__);
-        [self probeResource:resource
-               replyHandler:^(FSProbeResult * _Nullable result,
-                              NSError * _Nullable innerError) {
-            if (innerError) {
-                error = innerError;
-            } else {
-                self.probeResult = result;
-            }
-        }];
-    }
+
+    [self probeResource:resource
+           replyHandler:^(FSProbeResult * _Nullable result,
+                          NSError * _Nullable innerError) {
+        if (innerError) {
+            error = innerError;
+        } else {
+            probeResult = result;
+        }
+    }];
+
     if (error) {
+        if (forcedLoad) {
+            // If the force option is present, should set the container error state to NSError error EPROTONOSUPPORT and reply with no error and no volume.
+            self.containerStatus = [FSContainerStatus notReadyWithStatus:fs_errorForPOSIXError(EPROTONOSUPPORT)];
+            return reply(nil, nil);
+        }
         // Return probe error
         return reply(nil, error);
     }
 
-    if (_probeResult.result != FSMatchResultUsable) {
-        // Resource can't be used for MSDOS module
+    if (probeResult.result != FSMatchResultUsable) {
+        if (forcedLoad) {
+            // If the force option is present, should set the container error state to NSError error EPROTONOSUPPORT and reply with no error and no volume.
+            self.containerStatus = [FSContainerStatus notReadyWithStatus:fs_errorForPOSIXError(EPROTONOSUPPORT)];
+            return reply(nil, nil);
+        }
+
+        if (probeResult.result != FSMatchResultNotRecognized) {
+            /*
+             * If the resource is formatted using a recognized but unsupported format, this method will set the container error
+             * state to NSError FSKitErrorDomain code FSKitErrorUnusable. The method should reply with the same error.
+             */
+            NSError *containerErr = [NSError errorWithDomain:FSKitErrorDomain
+                                                        code:FSErrorResourceUnusable
+                                                    userInfo:nil];
+            self.containerStatus = [FSContainerStatus notReadyWithStatus:containerErr];
+            return reply(nil, containerErr);
+        }
+
+        // The only state left is that the resource is formatted using an unrecognized format. reply with the NSError POSIX error EINVAL.
         return reply(nil, fs_errorForPOSIXError(EINVAL));
     }
 
     _volume = [[msdosVolume alloc] initWithResource:resource
-                                           volumeID:_probeResult.containerID.volumeIdentifier
-                                         volumeName:_probeResult.name];
+                                           volumeID:probeResult.containerID.volumeIdentifier
+                                         volumeName:probeResult.name];
 
     if (_volume != nil) {
-        os_log_info(fskit_std_log(), "%s: loaded resource with volume ID (%@)", __FUNCTION__, _probeResult.containerID);
+        os_log_info(OS_LOG_DEFAULT, "%s: loaded resource with volume ID (%@)", __FUNCTION__, probeResult.containerID);
+        self.containerStatus = [FSContainerStatus ready];
         return reply(self.volume, nil);
     } else {
         /* init isn't supposed to fail, assume EIO if it did */
@@ -232,6 +231,16 @@ int wipeFSCallback(newfs_client_ctx_t ctx, WipeFSProperties wipeFSProps)
     }
 }
 
+- (void)unloadResource:(nonnull FSResource *)resource
+               options:(nonnull FSTaskOptions *)options
+          replyHandler:(nonnull void (^)(NSError * _Nullable))reply
+{
+    if (_resource) {
+        _resource = nil;
+        _volume = nil;
+    }
+    reply(nil);
+}
 
 -(NSError *_Nullable)syncRead:(FSBlockDeviceResource *)device
                          into:(void *)buffer
@@ -240,34 +249,32 @@ int wipeFSCallback(newfs_client_ctx_t ctx, WipeFSProperties wipeFSProps)
 {
     __block NSError *error = nil;
 
-    [device synchronousReadInto:buffer
-                     startingAt:offset
-                         length:nbyte
-                   replyHandler:^(size_t actuallyRead, NSError * _Nullable innerError) {
-        if (innerError) {
-            os_log_error(fskit_std_log(), "%s: Failed to read, error %@", __FUNCTION__, innerError);
-            error = innerError;
-        } else if (actuallyRead != nbyte) {
-            os_log_error(fskit_std_log(), "%s: Expected to read %lu bytes, read %lu", __FUNCTION__, nbyte, actuallyRead);
-            /*
-             * Setting to EIO for now. pread's manpage lists it as a possible
-             * errno value:
-             * An I/O error occurred while reading from the file system.
-             */
-            error = fs_errorForPOSIXError(EIO);
-        }
-    }];
+    size_t actuallyRead = [device readInto:buffer
+                                startingAt:offset
+                                    length:nbyte
+                                     error:&error];
+    if (error) {
+        os_log_error(OS_LOG_DEFAULT, "%s: Failed to read, error %@", __FUNCTION__, error);
+    } else if (actuallyRead != nbyte) {
+        os_log_error(OS_LOG_DEFAULT, "%s: Expected to read %lu bytes, read %lu", __FUNCTION__, nbyte, actuallyRead);
+        /*
+         * Setting to EIO for now. pread's manpage lists it as a possible
+         * errno value:
+         * An I/O error occurred while reading from the file system.
+         */
+        error = fs_errorForPOSIXError(EIO);
+    }
 
     return error;
 }
 
 -(void)probeResource:(FSResource *)resource
         replyHandler:(void(^)(FSProbeResult * _Nullable result,
-                              NSError * _Nullable error))reply
+                              NSError * _Nullable error))replyHandler
 {
-    FSMatchResult matchResult = FSMatchResultNotRecognized;
     NSMutableData *bootSectorBuffer = nil;
     FSBlockDeviceResource *device = nil;
+    FSProbeResult *probeResult = FSProbeResult.notRecognizedProbeResult;
     unsigned char *volUuid = NULL;
     union bootsector *bootSector;
     __block NSError *error = nil;
@@ -279,7 +286,7 @@ int wipeFSCallback(newfs_client_ctx_t ctx, WipeFSProperties wipeFSProps)
         device = (FSBlockDeviceResource *)resource;
     }
     if (!device) {
-        os_log(fskit_std_log(), "%s: Given device is not a block device", __FUNCTION__);
+        os_log(OS_LOG_DEFAULT, "%s: Given device is not a block device", __FUNCTION__);
         goto out;
     }
 
@@ -363,37 +370,37 @@ int wipeFSCallback(newfs_client_ctx_t ctx, WipeFSProperties wipeFSProps)
         goto out;
     }
     nsuuid = [Utilities generateVolumeUuid:bootSector uuid:volUuid];
-
-    matchResult = FSMatchResultUsable;
-out:
-    os_log_debug(fskit_std_log(), "%s: Setting up probeResult (%@)", __FUNCTION__, nsuuid);
-    if (error) {
-        return reply(nil, error);
+    {
+        // explicitly mark that containerID goes out of scope before the out: label
+        FSContainerIdentifier *containerID = [[FSContainerIdentifier alloc] initWithUUID:nsuuid];
+        os_log_debug(OS_LOG_DEFAULT, "%s: Setting up probeResult (%@)", __FUNCTION__, nsuuid);
+        probeResult = [FSProbeResult usableProbeResultWithName:volName
+                                                   containerID:containerID];
     }
-    _probeResult = [FSProbeResult resultWithResult:matchResult
-                                              name:volName
-                                       containerID:nsuuid.fs_containerIdentifier];
-    reply(_probeResult, error);
+out:
+    if (error) {
+        return replyHandler(nil, error);
+    }
+    return replyHandler(probeResult, error);
 }
 
--(void)checkWithParameters:(FSTaskParameters *)parameters
-                connection:(FSMessageConnection *)connection
-                    taskID:(NSUUID *)taskID
-              replyHandler:(void (^)(NSProgress * _Nullable progress,
-                            NSError * _Nullable err))reply
+-(NSProgress * _Nullable)startCheckWithTask:(FSTask *)task
+                                    options:(FSTaskOptions *)options
+                                      error:(NSError**)error
 {
+    taskParameters      *parameters = options.taskOptions;
     NSProgress          *progress = [[NSProgress alloc] init];
     msdosProgressHelper *updater = [[msdosProgressHelper alloc] initWithProgress:progress];
-    check_context context = {0};
+    __block check_context context = {0};
     FSBlockDeviceResource *device = _resource;
     int preCheckResult = 0;
-    int result = 0;
+    __block int result = 0;
 
-    os_log(fskit_std_log(), "%s: started to check resource", __FUNCTION__);
+    os_log(OS_LOG_DEFAULT, "%s: started to check resource", __FUNCTION__);
 
     progress.totalUnitCount = 100;
 
-    fsck_client_ctx_t ctx = (__bridge_retained void *)connection;
+    __block fsck_client_ctx_t ctx = (__bridge_retained void *)task;
     fsck_set_context_properties(fsckPrintFunction, fsckAskFunction, ctx);
     fsck_set_maxmem(20 * 1024 * 1024);
 
@@ -422,7 +429,7 @@ out:
                 snprintf(errorStr, sizeof(errorStr), "Size argument missing\n");
                 fsckPrintFunction(ctx, LOG_CRIT, errorStr, NULL);
                 preCheckResult = EINVAL;
-                goto exit;
+                goto afterPreCheck;
             }
             option = parameters[++i];
             value = [option UTF8String];
@@ -431,7 +438,7 @@ out:
                 snprintf(errorStr, sizeof(errorStr), "Size argument '%s' not recognized\n", value);
                 fsckPrintFunction(ctx, LOG_CRIT, errorStr, NULL);
                 preCheckResult = EINVAL;
-                goto exit;
+                goto afterPreCheck;
             }
             switch (value[offset])
             {
@@ -453,7 +460,7 @@ bad_multiplier:
                 snprintf(errorStr, sizeof(errorStr), "Size multiplier '%s' not recognized\n", value+offset);
                 fsckPrintFunction(ctx, LOG_CRIT, errorStr, NULL);
                 preCheckResult = EINVAL;
-                goto exit;
+                goto afterPreCheck;
             }
             fsck_set_maxmem(maxmem);
         } else {
@@ -461,19 +468,22 @@ bad_multiplier:
             snprintf(errorStr, sizeof(errorStr), "Option '%s' not recognized\n", [option UTF8String]);
             fsckPrintFunction(ctx, LOG_CRIT, errorStr, NULL);
             preCheckResult = EINVAL;
-            goto exit;
+            goto afterPreCheck;
         }
     }
 
     fsck_set_dev([[device BSDName] UTF8String]);
 
+afterPreCheck:
+    // If error was found before starting to check the filesystem, reply about that error
+    if(preCheckResult) {
+        if (error) {
+            *error = fs_errorForPOSIXError(preCheckResult);
+        }
+        os_log(OS_LOG_DEFAULT, "%s:done:error(%@)", __FUNCTION__, *error);
+        return nil;
+    }
     // No errors found start checking file system.
-    /*
-     Once we call the reply block, we officially transition from preparing to check
-     to actually checking. After this point, a UI can throw up a progress bar.
-     */
-    reply(progress, nil);
-
     context.updater = (__bridge_retained void*)updater;
     context.startPhase = startCallback;
     context.endPhase = endCallback;
@@ -481,40 +491,32 @@ bad_multiplier:
     context.readHelper = readHelper;
     context.writeHelper = writeHelper;
     context.fstatHelper = fstatHelper;
-    result = checkfilesys([[device BSDName] UTF8String], &context);
+    dispatch_async(dispatch_get_global_queue (DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        result = checkfilesys([[device BSDName] UTF8String], &context);
 
-    if (progress.totalUnitCount > progress.completedUnitCount) {
-        progress.completedUnitCount = progress.totalUnitCount;
-    }
-    CFRelease(context.updater);
-    context.updater = NULL;
-    fsck_set_fd(-1);
-    CFRelease(ctx);
-    ctx = NULL;
-
-exit:
-    // If error was found before starting to check the filesystem, reply about that error
-    if(preCheckResult) {
-        reply(nil, fs_errorForPOSIXError(preCheckResult));
-    } else {
-        [connection didCompleteWithError:result ? fs_errorForPOSIXError(result) : nil
-                       completionHandler:^(NSError * _Nullable err) {
-            // Nothing
-        }];
-    }
-
-    os_log(fskit_std_log(), "%s: done", __FUNCTION__);
+        if (progress.totalUnitCount > progress.completedUnitCount) {
+            progress.completedUnitCount = progress.totalUnitCount;
+        }
+        CFRelease(context.updater);
+        context.updater = NULL;
+        fsck_set_fd(-1);
+        CFRelease(ctx);
+        ctx = NULL;
+        [task didCompleteWithError:result ? fs_errorForPOSIXError(result) : nil];
+    });
+    os_log(OS_LOG_DEFAULT, "%s: done", __FUNCTION__);
+    return progress;
 }
 
--(void)formatWithParameters:(FSTaskParameters *)parameters
-                         connection:(FSMessageConnection *)connection
-                             taskID:(NSUUID *)taskID
-                       replyHandler:(void (^)(NSProgress * _Nullable p, NSError * _Nullable))reply
+-(NSProgress * _Nullable)startFormatWithTask:(FSTask *)task
+                                     options:(FSTaskOptions *)options
+                                       error:(NSError**)error
 {
+    taskParameters    *parameters = options.taskOptions;
     NSProgress  *progress = [[NSProgress alloc] init];
     msdosProgressHelper *updater = [[msdosProgressHelper alloc] initWithProgress:progress];
     FSBlockDeviceResource *device = _resource;
-    struct format_context_s context = {0};
+    __block struct format_context_s context = {0};
     newfs_client_ctx_t client_ctx = NULL;
     NSString *errFormatStr = nil;
     NewfsProperties newfsProps;
@@ -524,9 +526,11 @@ exit:
     char buf[MAXPATHLEN];
     NewfsOptions sopts;
     int bootFD = -1;
-    int result = 0;
+    __block int result = 0;
+    const char *bname = NULL;
+    const char *fname = NULL;
 
-    os_log(fskit_std_log(), "%s: started to format resource", __FUNCTION__);
+    os_log(OS_LOG_DEFAULT, "%s: started to format resource", __FUNCTION__);
 
     progress.totalUnitCount = 100;
 
@@ -534,12 +538,12 @@ exit:
     memset(&newfsProps, 0, sizeof(newfsProps));
     newfsCtx = malloc(sizeof(NewfsCtxAppex));
     if (!newfsCtx) {
-        os_log_error(fskit_std_log(), "%s: Can't allocate a wipe FS context object", __FUNCTION__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Can't allocate a wipe FS context object", __FUNCTION__);
         preFormatResult = ENOMEM;
-        goto exit;
+        goto afterPreCheck;
     }
-    newfsCtx->fsMsgConn = connection;
-    newfsCtx->resource = (FSBlockDeviceResource*)_resource;
+    newfsCtx->fsTask = task;
+    newfsCtx->resource = _resource;
     newfsCtx->fs = self;
 
     client_ctx = (void *)newfsCtx;
@@ -568,14 +572,14 @@ exit:
                 logMsg = [[NSString alloc] initWithFormat:errFormatStr, key];
                 newfsPrintFunction(client_ctx, LOG_ERR, [logMsg UTF8String], NULL);
                 preFormatResult = EINVAL;
-                goto exit;
+                goto afterPreCheck;
             }
             if (strcmp(value, "12") && strcmp(value, "16") && strcmp(value, "32")) {
                 errFormatStr = @"Invalid FAT type (%s), must be 12/16 or 32";
                 logMsg = [[NSString alloc] initWithFormat:errFormatStr, value];
                 newfsPrintFunction(client_ctx, LOG_ERR, [logMsg UTF8String], NULL);
                 preFormatResult = EINVAL;
-                goto exit;
+                goto afterPreCheck;
             }
             sopts.FATType = atoi(value);
         } else if ([key isEqualToString:@"-I"]) {
@@ -589,7 +593,7 @@ exit:
                 logMsg = [[NSString alloc] initWithFormat:errFormatStr, value];
                 newfsPrintFunction(client_ctx, LOG_ERR, [logMsg UTF8String], NULL);
                 preFormatResult = EINVAL;
-                goto exit;
+                goto afterPreCheck;
             }
             sopts.OEMString = value;
         } else if ([key isEqualToString:@"-S"]) {
@@ -651,15 +655,13 @@ exit:
                 logMsg = [[NSString alloc] initWithFormat:errFormatStr, value];
                 newfsPrintFunction(client_ctx, LOG_ERR, [logMsg UTF8String], NULL);
                 preFormatResult = EINVAL;
-                goto exit;
+                goto afterPreCheck;
             }
             sopts.volumeName = value;
         }
     }
 
-    const char * fname = [device.BSDName UTF8String];
-
-    const char *bname = NULL;
+    fname = [device.BSDName UTF8String];
     if (sopts.bootStrapFromFile) {
         bname = sopts.bootStrapFromFile;
         if (!strchr(bname, '/')) {
@@ -668,7 +670,7 @@ exit:
                 NSString* errMsg = [NSString stringWithFormat:@"%s", strerror(errno)];
                 newfsPrintFunction(client_ctx, LOG_ERR, [errMsg UTF8String], NULL);
                 preFormatResult = EINVAL;
-                goto exit;
+                goto afterPreCheck;
             }
         }
         // XXXKL: Update the commented out code once FSTaskOptionBundle is able to pass file descriptors
@@ -678,12 +680,17 @@ exit:
         } */
     }
 
-    /*
-     Once we call the reply block, we officially transition from preparing to format
-     to actually formatting. After this point, a UI can throw up a progress bar.
-     */
-    reply(progress, nil);
-
+afterPreCheck:
+    // If error was found before starting to check the filesystem, reply about that error
+    if(preFormatResult) {
+        if (newfsCtx) {
+            free(newfsCtx);
+        }
+        if (error) {
+            *error = fs_errorForPOSIXError(preFormatResult);
+        }
+        return nil;
+    }
     // Setup the newfs properties
     newfsProps.devName = fname;
     newfsProps.blockSize = (uint32_t)device.blockSize;
@@ -698,35 +705,28 @@ exit:
     context.resource = (__bridge_retained void*)_resource;
     context.readHelper = readHelper;
     context.writeHelper = writeHelper;
-    result = format(sopts, newfsProps, &context);
-    if (progress.totalUnitCount > progress.completedUnitCount) {
-        progress.completedUnitCount = progress.totalUnitCount;
-    }
-    CFRelease(context.updater);
-    context.updater = NULL;
+    dispatch_async(dispatch_get_global_queue (DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        result = format(sopts, newfsProps, &context);
+        if (progress.totalUnitCount > progress.completedUnitCount) {
+            progress.completedUnitCount = progress.totalUnitCount;
+        }
+        CFRelease(context.updater);
+        context.updater = NULL;
 
-exit:
-    if (newfsCtx) {
-        free(newfsCtx);
-    }
-    // If error was found before starting to check the filesystem, reply about that error
-    if(preFormatResult) {
-        reply(nil, fs_errorForPOSIXError(preFormatResult));
-    } else {
-        [connection didCompleteWithError:result ? fs_errorForPOSIXError(result) : nil
-                       completionHandler:^(NSError * _Nullable err) {
-            // Nothing
-        }];
-    }
-
-    /* Be done with the progress */
-    os_log(fskit_std_log(), "%s: done", __FUNCTION__);
+        if (newfsCtx) {
+            free(newfsCtx);
+        }
+        [task didCompleteWithError:result ? fs_errorForPOSIXError(result) : nil];
+        /* Be done with the progress */
+        os_log(OS_LOG_DEFAULT, "%s: done", __FUNCTION__);
+    });
+    return progress;
 }
 
 void startCallback(char* description, int64_t parentUnitCount, int64_t totalCount, unsigned int *completedCount, void *updater)
 {
     if (!description) {
-        os_log_error(fskit_std_log(), "%s: Invalid description (null)", __FUNCTION__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Invalid description (null)", __FUNCTION__);
         return;
     }
     msdosProgressHelper *progressUpdater = (__bridge msdosProgressHelper *)updater;
@@ -737,14 +737,14 @@ void startCallback(char* description, int64_t parentUnitCount, int64_t totalCoun
                                phaseTotalCount:totalCount
                               completedCounter:completedCount];
     if (updaterError) {
-        os_log_error(fskit_std_log(), "Failed to start phase, error %s",[[updaterError description] UTF8String]);
+        os_log_error(OS_LOG_DEFAULT, "Failed to start phase, error %s",[[updaterError description] UTF8String]);
     }
 }
 
 void endCallback(char* description, void *updater)
 {
     if (!description) {
-        os_log_error(fskit_std_log(), "%s: Invalid description (null)", __FUNCTION__);
+        os_log_error(OS_LOG_DEFAULT, "%s: Invalid description (null)", __FUNCTION__);
         return;
     }
     msdosProgressHelper *progressUpdater = (__bridge msdosProgressHelper *)updater;
@@ -754,39 +754,34 @@ void endCallback(char* description, void *updater)
 size_t readHelper(void *resource, void *buffer, size_t nbytes, off_t offset)
 {
     FSBlockDeviceResource *device = (__bridge FSBlockDeviceResource*)resource;
-    __block size_t read = 0;
-
-    [device synchronousReadInto:buffer
-                     startingAt:offset
-                         length:nbytes
-                   replyHandler:^(size_t actuallyRead,
-                                  NSError * _Nullable error) {
-        if (error) {
-            errno = (int)error.code;
-        } else {
-            read = actuallyRead;
-        }
-    }];
-
+    NSError *error = nil;
+    size_t read = 0;
+    size_t actuallyRead = [device readInto:buffer
+                                startingAt:offset
+                                    length:nbytes
+                                     error:&error];
+    if (error) {
+        errno = (int)error.code;
+    } else {
+        read = actuallyRead;
+    }
     return read;
 }
 
 size_t writeHelper(void *resource, void *buffer, size_t nbytes, off_t offset)
 {
     FSBlockDeviceResource *device = (__bridge FSBlockDeviceResource*)resource;
-    __block size_t written = 0;
-
-    [device synchronousWriteFrom:buffer
-                      startingAt:offset
-                          length:nbytes
-                    replyHandler:^(size_t actuallyWritten,
-                                   NSError * _Nullable error) {
-        if (error) {
-            errno = (int)error.code;
-        } else {
-            written = actuallyWritten;
-        }
-    }];
+    NSError *error = nil;
+    size_t written = 0;
+    size_t actuallyWritten = [device writeFrom:buffer
+                                    startingAt:offset
+                                        length:nbytes
+                                         error:&error];
+    if (error) {
+        errno = (int)error.code;
+    } else {
+        written = actuallyWritten;
+    }
 
     return written;
 }
